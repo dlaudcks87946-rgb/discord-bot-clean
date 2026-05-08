@@ -93,11 +93,15 @@ GAME_DATA = {
     "서든어택": {"emoji": "🔫", "color": 0x2b2d31, "image": "https://i.namu.wiki/i/1mH8Ae0cQRPdbxclfEKND_8aa6kpn86MSBYiJK7_Coh362VMvgbgyDCSm8H2raru-33_SnZ0xa6oK-tMbnQT3g.webp"},
     "스팀": {"emoji": "🎮", "color": 0x1b2838, "image": "https://i.namu.wiki/i/J0mA8KSg4QpPd07VtHqOSr4A8UhKNOaUUctpdJb6IVno4zqLCHDC_sM8z1hDz-RsaiOYLfOevgkrHTMgXslirA.svg"},
     "롤 내전": {"emoji": "⚔️", "color": 0x0099ff, "image": "https://i.namu.wiki/i/bcJDyma8areiVI20l4oUFYr6Y6LqPw3NczClG_r0PGkmwvFqEzbkdpUkUdIl1b15WotgqANrvYW4p0LcTcXyyA.webp"},
+    "옵치 내전": {"emoji": "🛡️", "color": 0xfa9c1e, "image": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRamwdKLcNDA5HmgJK6gNkrWN93hQLuSpMTkg&s"},
+    "옵치 6vs6": {"emoji": "🚀", "color": 0xfa9c1e, "image": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRamwdKLcNDA5HmgJK6gNkrWN93hQLuSpMTkg&s"},
 }
 
 # 알림 매핑 (줄임말 입력 시 여러 역할 멘션)
 MENTION_MAPPING = {
     "옵치": ["오버워치", "옵치"],
+    "옵치 내전": ["오버워치", "옵치"],
+    "옵치 6vs6": ["오버워치", "옵치"],
     "오버워치": ["오버워치", "옵치"],
     "리그": ["롤", "리그오브레전드"],
     "리그오브레전드": ["롤", "리그오브레전드"],
@@ -200,8 +204,8 @@ async def handle_action(interaction, room_id, choice):
         cursor.execute("SELECT game FROM rooms WHERE room_id=?", (room_id,))
         game_name = cursor.fetchone()[0]
         
-        if "롤" in game_name or "리그" in game_name:
-            await interaction.response.send_message("🛡️ 자신의 **포지션**과 **티어**를 선택해주세요.", view=InfoSelectView(room_id), ephemeral=True)
+        if "롤" in game_name or "리그" in game_name or "옵치" in game_name or "오버워치" in game_name:
+            await interaction.response.send_message("🛡️ 자신의 **포지션**과 **티어**를 선택해주세요.", view=InfoSelectView(room_id, game_name), ephemeral=True)
             return
 
         if get_count(room_id, "참가") >= max_people:
@@ -348,53 +352,85 @@ class RoomView(discord.ui.View):
 # 포지션/티어 선택 UI
 # =========================
 class InfoSelectView(discord.ui.View):
-    def __init__(self, room_id):
+    def __init__(self, room_id, game_name):
         super().__init__(timeout=60)
         self.room_id = room_id
         self.tier = "-"
         self.position = "-"
+        
+        # 게임별 옵션 설정
+        if "롤" in game_name or "리그" in game_name:
+            pos_options = [
+                discord.SelectOption(label="탑", emoji="🛡️"),
+                discord.SelectOption(label="정글", emoji="⚔️"),
+                discord.SelectOption(label="미드", emoji="🔮"),
+                discord.SelectOption(label="원딜", emoji="🏹"),
+                discord.SelectOption(label="서폿", emoji="🌿"),
+            ]
+            tier_options = [
+                discord.SelectOption(label="아이언", emoji="🌑"),
+                discord.SelectOption(label="브론즈", emoji="🟤"),
+                discord.SelectOption(label="실버", emoji="⚪"),
+                discord.SelectOption(label="골드", emoji="🟡"),
+                discord.SelectOption(label="플래티넘", emoji="🟢"),
+                discord.SelectOption(label="에메랄드", emoji="✳️"),
+                discord.SelectOption(label="다이아", emoji="💎"),
+                discord.SelectOption(label="마스터+", emoji="🔮"),
+            ]
+        elif "옵치" in game_name or "오버워치" in game_name:
+            pos_options = [
+                discord.SelectOption(label="탱커", emoji="🛡️"),
+                discord.SelectOption(label="딜러", emoji="⚔️"),
+                discord.SelectOption(label="힐러", emoji="💉"),
+            ]
+            tier_options = [
+                discord.SelectOption(label="브론즈", emoji="🟤"),
+                discord.SelectOption(label="실버", emoji="⚪"),
+                discord.SelectOption(label="골드", emoji="🟡"),
+                discord.SelectOption(label="플래티넘", emoji="🟢"),
+                discord.SelectOption(label="다이아", emoji="💎"),
+                discord.SelectOption(label="마스터", emoji="🔮"),
+                discord.SelectOption(label="그랜드마스터", emoji="✨"),
+                discord.SelectOption(label="랭커", emoji="👑"),
+            ]
+        else:
+            pos_options = [discord.SelectOption(label="일반", emoji="👤")]
+            tier_options = [discord.SelectOption(label="일반", emoji="📊")]
 
-    @discord.ui.select(
-        placeholder="포지션을 선택하세요",
-        options=[
-            discord.SelectOption(label="탑", emoji="🛡️"),
-            discord.SelectOption(label="정글", emoji="⚔️"),
-            discord.SelectOption(label="미드", emoji="🔮"),
-            discord.SelectOption(label="원딜", emoji="🏹"),
-            discord.SelectOption(label="서폿", emoji="🌿"),
-        ]
-    )
-    async def select_position(self, interaction, select):
-        self.position = select.values[0]
+        self.add_item(PositionSelect(pos_options))
+        self.add_item(TierSelect(tier_options))
+        self.add_item(ConfirmButton())
+
+class PositionSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="포지션을 선택하세요", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.position = self.values[0]
         await interaction.response.defer()
 
-    @discord.ui.select(
-        placeholder="티어를 선택하세요",
-        options=[
-            discord.SelectOption(label="아이언", emoji="🌑"),
-            discord.SelectOption(label="브론즈", emoji="🟤"),
-            discord.SelectOption(label="실버", emoji="⚪"),
-            discord.SelectOption(label="골드", emoji="🟡"),
-            discord.SelectOption(label="플래티넘", emoji="🟢"),
-            discord.SelectOption(label="에메랄드", emoji="✳️"),
-            discord.SelectOption(label="다이아", emoji="💎"),
-            discord.SelectOption(label="마스터+", emoji="🔮"),
-        ]
-    )
-    async def select_tier(self, interaction, select):
-        self.tier = select.values[0]
+class TierSelect(discord.ui.Select):
+    def __init__(self, options):
+        super().__init__(placeholder="티어를 선택하세요", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        self.view.tier = self.values[0]
         await interaction.response.defer()
 
-    @discord.ui.button(label="선택 완료", style=discord.ButtonStyle.green)
-    async def confirm(self, interaction, button):
-        if self.position == "-" or self.tier == "-":
+class ConfirmButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(label="선택 완료", style=discord.ButtonStyle.green)
+
+    async def callback(self, interaction: discord.Interaction):
+        view = self.view
+        if view.position == "-" or view.tier == "-":
             await interaction.response.send_message("❌ 포지션과 티어를 모두 선택해주세요.", ephemeral=True)
             return
 
-        cursor.execute("SELECT max_people FROM rooms WHERE room_id=?", (self.room_id,))
+        cursor.execute("SELECT max_people FROM rooms WHERE room_id=?", (view.room_id,))
         max_people = cursor.fetchone()[0]
 
-        cursor.execute("SELECT COUNT(*) FROM participants WHERE room_id=? AND category='참가'", (self.room_id,))
+        cursor.execute("SELECT COUNT(*) FROM participants WHERE room_id=? AND category='참가'", (view.room_id,))
         count = cursor.fetchone()[0]
 
         if count >= max_people:
@@ -402,42 +438,53 @@ class InfoSelectView(discord.ui.View):
         else:
             category = "참가"
 
-        remove_user(self.room_id, interaction.user.id)
-        cursor.execute("INSERT INTO participants VALUES (?, ?, ?, ?, ?)", (self.room_id, interaction.user.id, category, self.tier, self.position))
+        remove_user(view.room_id, interaction.user.id)
+        cursor.execute("INSERT INTO participants VALUES (?, ?, ?, ?, ?)", (view.room_id, interaction.user.id, category, view.tier, view.position))
         conn.commit()
 
-        # 메시지 업데이트를 위해 원본 메시지 찾기
-        cursor.execute("SELECT channel_id, message_id FROM rooms WHERE room_id=?", (self.room_id,))
+        cursor.execute("SELECT channel_id, message_id FROM rooms WHERE room_id=?", (view.room_id,))
         ch_id, msg_id = cursor.fetchone()
         channel = bot.get_channel(ch_id)
         if channel:
             try:
                 msg = await channel.fetch_message(msg_id)
-                await msg.edit(embed=make_embed(self.room_id, interaction.guild), view=RoomView(self.room_id))
+                await msg.edit(embed=make_embed(view.room_id, interaction.guild), view=RoomView(view.room_id))
             except:
                 pass
 
         try:
-            await interaction.response.send_message(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+            await interaction.response.send_message(f"✅ {view.position} / {view.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
         except:
-            await interaction.followup.send(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
-        self.stop()
+            await interaction.followup.send(f"✅ {view.position} / {view.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+        view.stop()
 
 class CreateModal(discord.ui.Modal, title="모집 생성"):
-    game = discord.ui.TextInput(label="게임")
-    people = discord.ui.TextInput(label="인원 (숫자)")
-    time_ = discord.ui.TextInput(label="시간")
+    def __init__(self, game_default="", people_default=""):
+        super().__init__()
+        self.game = discord.ui.TextInput(label="게임", default=game_default)
+        self.people = discord.ui.TextInput(label="인원 (숫자)", default=people_default)
+        self.time_ = discord.ui.TextInput(label="시간")
+        
+        self.add_item(self.game)
+        self.add_item(self.people)
+        self.add_item(self.time_)
 
     async def on_submit(self, interaction):
         room_id = str(interaction.id)
         guild = interaction.guild
 
-        # 음성 채널 이름 결정
+        # 음성 채널 이름 및 게임 이름 자동 조정 (옵치 12명인 경우 6vs6)
         game_val = self.game.value
+        people_count = int(self.people.value)
+        
+        if ("옵치" in game_val or "오버워치" in game_val) and people_count == 12:
+            if "6vs6" not in game_val:
+                game_val = f"{game_val} 6vs6"
+
         if game_val in ["롤", "리그오브레전드"]:
             channel_name = "┋⚔️┋리그오브레전드"
-        elif game_val in ["옵치", "오버워치"]:
-            channel_name = "┋⌚┋오버워치"
+        elif "옵치" in game_val or "오버워치" in game_val:
+            channel_name = f"┋⌚┋{game_val}"
         else:
             channel_name = f" {game_val}"
 
@@ -449,7 +496,7 @@ class CreateModal(discord.ui.Modal, title="모집 생성"):
 
         cursor.execute(
             "INSERT INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (room_id, self.game.value, int(self.people.value), self.time_.value, interaction.user.id, voice_channel.id, 0, 0)
+            (room_id, game_val, people_count, self.time_.value, interaction.user.id, voice_channel.id, 0, 0)
         )
         conn.commit()
 
