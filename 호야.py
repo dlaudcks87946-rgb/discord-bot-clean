@@ -113,7 +113,7 @@ def get_count(room_id, category):
 
 def add_user(room_id, user_id, category):
     remove_user(room_id, user_id)
-    cursor.execute("INSERT INTO participants VALUES (?, ?, ?)", (room_id, user_id, category))
+    cursor.execute("INSERT INTO participants (room_id, user_id, category) VALUES (?, ?, ?)", (room_id, user_id, category))
     conn.commit()
 
 def remove_user(room_id, user_id):
@@ -292,14 +292,17 @@ async def handle_action(interaction, room_id, choice):
         red_team = all_players[mid:]
         
         # 기존 팀 정보 초기화 및 재배정 (티어/포지션 유지)
-        for u, t, p in blue_team:
+        for u in blue_team:
             cursor.execute("UPDATE participants SET category=? WHERE room_id=? AND user_id=?", ("블루팀", room_id, u))
-        for u, t, p in red_team:
+        for u in red_team:
             cursor.execute("UPDATE participants SET category=? WHERE room_id=? AND user_id=?", ("레드팀", room_id, u))
         conn.commit()
         
         await interaction.response.edit_message(embed=make_embed(room_id, interaction.guild), view=RoomView(room_id))
-        await interaction.followup.send("🎲 팀이 무작위로 배정되었습니다!", ephemeral=True)
+        try:
+            await interaction.followup.send("🎲 팀이 무작위로 배정되었습니다!", ephemeral=True)
+        except:
+            pass
         return
 
     if not interaction.response.is_done():
@@ -312,28 +315,32 @@ class RoomView(discord.ui.View):
     def __init__(self, room_id):
         super().__init__(timeout=None)
         self.room_id = room_id
+        # 버튼들에 고유 ID 부여
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.custom_id = f"{child.label}_{room_id}"
 
-    @discord.ui.button(label="참가", style=discord.ButtonStyle.green, custom_id="join_btn")
+    @discord.ui.button(label="참가", style=discord.ButtonStyle.green)
     async def join(self, interaction, button):
         await handle_action(interaction, self.room_id, "참가")
 
-    @discord.ui.button(label="대기", style=discord.ButtonStyle.gray, custom_id="wait_btn")
+    @discord.ui.button(label="대기", style=discord.ButtonStyle.gray)
     async def wait(self, interaction, button):
         await handle_action(interaction, self.room_id, "대기")
 
-    @discord.ui.button(label="관전", style=discord.ButtonStyle.blurple, custom_id="watch_btn")
+    @discord.ui.button(label="관전", style=discord.ButtonStyle.blurple)
     async def watch(self, interaction, button):
         await handle_action(interaction, self.room_id, "관전")
 
-    @discord.ui.button(label="나가기", style=discord.ButtonStyle.red, custom_id="leave_btn")
+    @discord.ui.button(label="나가기", style=discord.ButtonStyle.red)
     async def leave(self, interaction, button):
         await handle_action(interaction, self.room_id, "나가기")
 
-    @discord.ui.button(label="종료", style=discord.ButtonStyle.danger, custom_id="close_btn")
+    @discord.ui.button(label="종료", style=discord.ButtonStyle.danger)
     async def close(self, interaction, button):
         await handle_action(interaction, self.room_id, "종료")
 
-    @discord.ui.button(label="팀 나누기", style=discord.ButtonStyle.secondary, custom_id="shuffle_btn")
+    @discord.ui.button(label="팀 나누기", style=discord.ButtonStyle.secondary)
     async def shuffle(self, interaction, button):
         await handle_action(interaction, self.room_id, "팀나누기")
 
@@ -381,7 +388,7 @@ class InfoSelectView(discord.ui.View):
     @discord.ui.button(label="선택 완료", style=discord.ButtonStyle.green)
     async def confirm(self, interaction, button):
         if self.position == "-" or self.tier == "-":
-            await interaction.followup.send("❌ 포지션과 티어를 모두 선택해주세요.", ephemeral=True)
+            await interaction.response.send_message("❌ 포지션과 티어를 모두 선택해주세요.", ephemeral=True)
             return
 
         cursor.execute("SELECT max_people FROM rooms WHERE room_id=?", (self.room_id,))
@@ -410,7 +417,10 @@ class InfoSelectView(discord.ui.View):
             except:
                 pass
 
-        await interaction.followup.send(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+        try:
+            await interaction.response.send_message(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+        except:
+            await interaction.followup.send(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
         self.stop()
 
 class CreateModal(discord.ui.Modal, title="모집 생성"):
@@ -432,7 +442,10 @@ class CreateModal(discord.ui.Modal, title="모집 생성"):
             channel_name = f" {game_val}"
 
         category = guild.get_channel(1488774793497940080)
-        voice_channel = await guild.create_voice_channel(channel_name, category=category)
+        try:
+            voice_channel = await guild.create_voice_channel(channel_name, category=category)
+        except:
+            voice_channel = await guild.create_voice_channel(channel_name)
 
         cursor.execute(
             "INSERT INTO rooms VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
