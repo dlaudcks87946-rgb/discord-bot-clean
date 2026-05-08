@@ -634,7 +634,7 @@ async def on_ready():
     for (room_id,) in cursor.fetchall():
         bot.add_view(RoomView(room_id))
 
-    print("완전 최종 실행 완료")
+    print("수정 완료")
 
 # =========================
 # 음성채널 자동 삭제
