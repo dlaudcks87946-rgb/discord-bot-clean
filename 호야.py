@@ -4,6 +4,7 @@ import sqlite3
 import os
 from flask import Flask
 from threading import Thread
+import random
 
 app = Flask('')
 
@@ -58,11 +59,19 @@ try:
 except:
     pass
 
+try:
+    cursor.execute("ALTER TABLE participants ADD COLUMN tier TEXT DEFAULT '-'")
+    cursor.execute("ALTER TABLE participants ADD COLUMN position TEXT DEFAULT '-'")
+except:
+    pass
+
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS participants (
     room_id TEXT,
     user_id INTEGER,
-    category TEXT
+    category TEXT,
+    tier TEXT DEFAULT '-',
+    position TEXT DEFAULT '-'
 )
 """)
 
@@ -83,6 +92,7 @@ GAME_DATA = {
     "메이플": {"emoji": "🍁", "color": 0xff8c00, "image": "https://image.ytn.co.kr/general/jpg/2021/0311/202103110915014429_d.jpg"}, # 메이플 대체 (단풍잎 아이콘)
     "서든어택": {"emoji": "🔫", "color": 0x2b2d31, "image": "https://i.namu.wiki/i/1mH8Ae0cQRPdbxclfEKND_8aa6kpn86MSBYiJK7_Coh362VMvgbgyDCSm8H2raru-33_SnZ0xa6oK-tMbnQT3g.webp"},
     "스팀": {"emoji": "🎮", "color": 0x1b2838, "image": "https://i.namu.wiki/i/J0mA8KSg4QpPd07VtHqOSr4A8UhKNOaUUctpdJb6IVno4zqLCHDC_sM8z1hDz-RsaiOYLfOevgkrHTMgXslirA.svg"},
+    "롤 내전": {"emoji": "⚔️", "color": 0x0099ff, "image": "https://i.namu.wiki/i/bcJDyma8areiVI20l4oUFYr6Y6LqPw3NczClG_r0PGkmwvFqEzbkdpUkUdIl1b15WotgqANrvYW4p0LcTcXyyA.webp"},
 }
 
 # 알림 매핑 (줄임말 입력 시 여러 역할 멘션)
@@ -114,6 +124,14 @@ def get_users(room_id, category):
     cursor.execute("SELECT user_id FROM participants WHERE room_id=? AND category=?", (room_id, category))
     return [row[0] for row in cursor.fetchall()]
 
+def get_users_info(room_id, category):
+    cursor.execute("SELECT user_id, tier, position FROM participants WHERE room_id=? AND category=?", (room_id, category))
+    return cursor.fetchall()
+
+def update_user_info(room_id, user_id, tier, position):
+    cursor.execute("UPDATE participants SET tier=?, position=? WHERE room_id=? AND user_id=?", (tier, position, room_id, user_id))
+    conn.commit()
+
 def make_embed(room_id, guild=None):
     cursor.execute("SELECT game, max_people, time, owner_id FROM rooms WHERE room_id=?", (room_id,))
     row = cursor.fetchone()
@@ -128,9 +146,11 @@ def make_embed(room_id, guild=None):
             data = val
             break
 
-    join = get_users(room_id, "참가")
-    wait = get_users(room_id, "대기")
-    watch = get_users(room_id, "관전")
+    join = get_users_info(room_id, "참가")
+    wait = get_users_info(room_id, "대기")
+    watch = get_users_info(room_id, "관전")
+    blue = get_users_info(room_id, "블루팀")
+    red = get_users_info(room_id, "레드팀")
 
     embed = discord.Embed(
         title=f"{data['emoji']} {game}",
@@ -148,9 +168,14 @@ def make_embed(room_id, guild=None):
     
     embed.add_field(name="👥 현재 인원", value=f"{progress_bar} ({len(join)}/{max_people})", inline=False)
     
-    embed.add_field(name="✅ 참가자", value="\n".join([f"└ <@{u}>" for u in join]) or "└ -", inline=True)
-    embed.add_field(name="⏳ 대기", value="\n".join([f"└ <@{u}>" for u in wait]) or "└ -", inline=True)
-    embed.add_field(name="👀 관전", value="\n".join([f"└ <@{u}>" for u in watch]) or "└ -", inline=True)
+    embed.add_field(name="✅ 참가자", value="\n".join([f"└ <@{u}> `[{p}/{t}]`" for u, t, p in join]) or "└ -", inline=True)
+    
+    if blue or red:
+        embed.add_field(name="🔵 블루팀", value="\n".join([f"└ <@{u}> `[{p}/{t}]`" for u, t, p in blue]) or "└ -", inline=True)
+        embed.add_field(name="🔴 레드팀", value="\n".join([f"└ <@{u}> `[{p}/{t}]`" for u, t, p in red]) or "└ -", inline=True)
+    
+    embed.add_field(name="⏳ 대기", value="\n".join([f"└ <@{u}> `[{p}/{t}]`" for u, t, p in wait]) or "└ -", inline=True)
+    embed.add_field(name="👀 관전", value="\n".join([f"└ <@{u}>" for u, t, p in watch]) or "└ -", inline=True)
 
     if guild:
         owner = guild.get_member(owner_id)
@@ -172,6 +197,13 @@ async def handle_action(interaction, room_id, choice):
     voice_channel = interaction.guild.get_channel(voice_id)
 
     if choice == "참가":
+        cursor.execute("SELECT game FROM rooms WHERE room_id=?", (room_id,))
+        game_name = cursor.fetchone()[0]
+        
+        if "롤" in game_name or "리그" in game_name:
+            await interaction.response.send_message("🛡️ 자신의 **포지션**과 **티어**를 선택해주세요.", view=InfoSelectView(room_id), ephemeral=True)
+            return
+
         if get_count(room_id, "참가") >= max_people:
             add_user(room_id, interaction.user.id, "대기")
             await interaction.response.edit_message(embed=make_embed(room_id, interaction.guild), view=RoomView(room_id))
@@ -239,6 +271,37 @@ async def handle_action(interaction, room_id, choice):
         await interaction.message.delete()
         return
 
+    elif choice == "팀나누기":
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message("❌ 방장만 가능", ephemeral=True)
+            return
+        
+        participants = get_users(room_id, "참가")
+        blue_existing = get_users(room_id, "블루팀")
+        red_existing = get_users(room_id, "레드팀")
+        
+        all_players = participants + blue_existing + red_existing
+        
+        if len(all_players) < 2:
+            await interaction.response.send_message("❌ 최소 2명 이상의 참가자가 필요합니다.", ephemeral=True)
+            return
+        
+        random.shuffle(all_players)
+        mid = len(all_players) // 2
+        blue_team = all_players[:mid]
+        red_team = all_players[mid:]
+        
+        # 기존 팀 정보 초기화 및 재배정 (티어/포지션 유지)
+        for u, t, p in blue_team:
+            cursor.execute("UPDATE participants SET category=? WHERE room_id=? AND user_id=?", ("블루팀", room_id, u))
+        for u, t, p in red_team:
+            cursor.execute("UPDATE participants SET category=? WHERE room_id=? AND user_id=?", ("레드팀", room_id, u))
+        conn.commit()
+        
+        await interaction.response.edit_message(embed=make_embed(room_id, interaction.guild), view=RoomView(room_id))
+        await interaction.followup.send("🎲 팀이 무작위로 배정되었습니다!", ephemeral=True)
+        return
+
     if not interaction.response.is_done():
         await interaction.response.edit_message(embed=make_embed(room_id, interaction.guild), view=RoomView(room_id))
 
@@ -269,6 +332,86 @@ class RoomView(discord.ui.View):
     @discord.ui.button(label="종료", style=discord.ButtonStyle.danger, custom_id="close_btn")
     async def close(self, interaction, button):
         await handle_action(interaction, self.room_id, "종료")
+
+    @discord.ui.button(label="팀 나누기", style=discord.ButtonStyle.secondary, custom_id="shuffle_btn")
+    async def shuffle(self, interaction, button):
+        await handle_action(interaction, self.room_id, "팀나누기")
+
+# =========================
+# 포지션/티어 선택 UI
+# =========================
+class InfoSelectView(discord.ui.View):
+    def __init__(self, room_id):
+        super().__init__(timeout=60)
+        self.room_id = room_id
+        self.tier = "-"
+        self.position = "-"
+
+    @discord.ui.select(
+        placeholder="포지션을 선택하세요",
+        options=[
+            discord.SelectOption(label="탑", emoji="🛡️"),
+            discord.SelectOption(label="정글", emoji="⚔️"),
+            discord.SelectOption(label="미드", emoji="🔮"),
+            discord.SelectOption(label="원딜", emoji="🏹"),
+            discord.SelectOption(label="서폿", emoji="🌿"),
+        ]
+    )
+    async def select_position(self, interaction, select):
+        self.position = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.select(
+        placeholder="티어를 선택하세요",
+        options=[
+            discord.SelectOption(label="아이언", emoji="🌑"),
+            discord.SelectOption(label="브론즈", emoji="🟤"),
+            discord.SelectOption(label="실버", emoji="⚪"),
+            discord.SelectOption(label="골드", emoji="🟡"),
+            discord.SelectOption(label="플래티넘", emoji="🟢"),
+            discord.SelectOption(label="에메랄드", emoji="✳️"),
+            discord.SelectOption(label="다이아", emoji="💎"),
+            discord.SelectOption(label="마스터+", emoji="🔮"),
+        ]
+    )
+    async def select_tier(self, interaction, select):
+        self.tier = select.values[0]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="선택 완료", style=discord.ButtonStyle.green)
+    async def confirm(self, interaction, button):
+        if self.position == "-" or self.tier == "-":
+            await interaction.followup.send("❌ 포지션과 티어를 모두 선택해주세요.", ephemeral=True)
+            return
+
+        cursor.execute("SELECT max_people FROM rooms WHERE room_id=?", (self.room_id,))
+        max_people = cursor.fetchone()[0]
+
+        cursor.execute("SELECT COUNT(*) FROM participants WHERE room_id=? AND category='참가'", (self.room_id,))
+        count = cursor.fetchone()[0]
+
+        if count >= max_people:
+            category = "대기"
+        else:
+            category = "참가"
+
+        remove_user(self.room_id, interaction.user.id)
+        cursor.execute("INSERT INTO participants VALUES (?, ?, ?, ?, ?)", (self.room_id, interaction.user.id, category, self.tier, self.position))
+        conn.commit()
+
+        # 메시지 업데이트를 위해 원본 메시지 찾기
+        cursor.execute("SELECT channel_id, message_id FROM rooms WHERE room_id=?", (self.room_id,))
+        ch_id, msg_id = cursor.fetchone()
+        channel = bot.get_channel(ch_id)
+        if channel:
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=make_embed(self.room_id, interaction.guild), view=RoomView(self.room_id))
+            except:
+                pass
+
+        await interaction.followup.send(f"✅ {self.position} / {self.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+        self.stop()
 
 class CreateModal(discord.ui.Modal, title="모집 생성"):
     game = discord.ui.TextInput(label="게임")
