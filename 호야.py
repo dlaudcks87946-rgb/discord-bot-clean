@@ -1,5 +1,5 @@
-import discord
 from discord.ext import commands
+from discord import app_commands
 import sqlite3
 import os
 from flask import Flask
@@ -24,7 +24,7 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="/", intents=intents)
 
 # =========================
 # DB
@@ -539,9 +539,9 @@ class PanelView(discord.ui.View):
 # =========================
 # 모집판 추가
 # =========================
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 모집추가(ctx):
+@bot.tree.command(name="모집추가", description="모집판을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 모집추가(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎮 호야 모집판",
         description="함께 게임할 팀원을 모집해보세요!\n아래 버튼을 눌러 모집을 시작할 수 있습니다.",
@@ -550,12 +550,11 @@ async def 모집추가(ctx):
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1494319173940023411/1501615259549565102/18b6c8f6-c2d8-4eba-8dda-2aba45b4bba5.png?ex=69fcb7b0&is=69fb6630&hm=1d058fe2f297afbb1b124deb8f7bac4dcc4bfdea8999f4bfd2f7c1a6f07fe952&")  # 대표 아이콘
     embed.set_footer(text="호야 모집 시스템 • 매너 게임 부탁드립니다!")
     
-    msg = await ctx.send(embed=embed, view=PanelView())
+    await interaction.response.send_message(embed=embed, view=PanelView())
+    msg = await interaction.original_response()
 
-    cursor.execute("INSERT INTO panels VALUES (?, ?)", (ctx.channel.id, msg.id))
+    cursor.execute("INSERT INTO panels VALUES (?, ?)", (interaction.channel.id, msg.id))
     conn.commit()
-
-    await ctx.message.delete()
 
 # =========================
 # 역할 부여 시스템
@@ -597,26 +596,28 @@ class RoleButton(discord.ui.Button):
         except discord.Forbidden:
             await interaction.response.send_message(f"❌ 권한이 부족합니다. 서버 설정에서 **봇의 역할 순위**를 '{self.game_name}' 역할보다 위로 올려주세요!", ephemeral=True)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 역할설정(ctx):
+@bot.tree.command(name="역할설정", description="게임 역할 부여 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 역할설정(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎭 게임 역할 부여",
         description="아래 버튼을 클릭하여 관심 있는 게임의 역할을 받을 수 있습니다.\n역할을 받으면 해당 게임의 **모집 알림**을 받을 수 있습니다!",
         color=0x2b2d31
     )
     embed.set_footer(text="버튼을 다시 누르면 역할을 취소할 수 있습니다.")
-    await ctx.send(embed=embed, view=RoleAssignmentView())
-    await ctx.message.delete()
+    await interaction.response.send_message(embed=embed, view=RoleAssignmentView())
 
 # =========================
 # 초기 설정 (역할 생성)
 # =========================
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 초기설정(ctx):
+@bot.tree.command(name="초기설정", description="서버에 필요한 게임 역할들을 자동으로 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 초기설정(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
+    
     # "리그" 역할을 "리그오브레전드"로 미리 변경 (유저 정보 유지)
-    old_role = discord.utils.get(ctx.guild.roles, name="리그")
+    old_role = discord.utils.get(guild.roles, name="리그")
     if old_role:
         await old_role.edit(name="리그오브레전드")
 
@@ -625,8 +626,8 @@ async def 초기설정(ctx):
     existed = []
 
     for role_name in target_roles:
-        if not discord.utils.get(ctx.guild.roles, name=role_name):
-            await ctx.guild.create_role(name=role_name, mentionable=True)
+        if not discord.utils.get(guild.roles, name=role_name):
+            await guild.create_role(name=role_name, mentionable=True)
             created.append(role_name)
         else:
             existed.append(role_name)
@@ -637,8 +638,7 @@ async def 초기설정(ctx):
     if existed:
         res += f"- 이미 존재함: {', '.join(existed)}\n"
     
-    await ctx.send(res, delete_after=10)
-    await ctx.message.delete()
+    await interaction.followup.send(res, ephemeral=True)
 
 # =========================
 # 닉네임 변경 시스템
@@ -668,16 +668,15 @@ class NicknameView(discord.ui.View):
     async def change_nickname(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NicknameModal())
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 닉네임설정(ctx):
+@bot.tree.command(name="닉네임설정", description="닉네임 변경 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 닉네임설정(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📝 서버 닉네임 설정",
         description="아래 버튼을 눌러 이 서버에서 사용할 닉네임을 변경할 수 있습니다.",
         color=0x2b2d31
     )
-    await ctx.send(embed=embed, view=NicknameView())
-    await ctx.message.delete()
+    await interaction.response.send_message(embed=embed, view=NicknameView())
 
 # =========================
 # 자동 복구
@@ -693,6 +692,12 @@ async def on_ready():
     cursor.execute("SELECT room_id FROM rooms")
     for (room_id,) in cursor.fetchall():
         bot.add_view(RoomView(room_id))
+
+    try:
+        synced = await bot.tree.sync()
+        print(f"슬래시 명령어 {len(synced)}개 동기화 완료")
+    except Exception as e:
+        print(f"동기화 오류: {e}")
 
     print("수정 완료")
 
