@@ -6,6 +6,7 @@ import os
 from flask import Flask
 from threading import Thread
 import random
+import asyncio
 
 app = Flask('')
 
@@ -449,10 +450,14 @@ class ConfirmButton(discord.ui.Button):
             except:
                 pass
 
+        # 선택창 제거 및 확인 메시지 (1초 후 자동 삭제)
         try:
-            await interaction.response.send_message(f"✅ {view.position} / {view.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+            await interaction.response.edit_message(content="✅ 참가가 완료되었습니다!", view=None)
+            # ephemeral 메시지는 delete_original_response로 삭제 가능
+            await asyncio.sleep(1)
+            await interaction.delete_original_response()
         except:
-            await interaction.followup.send(f"✅ {view.position} / {view.tier} (으)로 참가가 완료되었습니다!", ephemeral=True)
+            pass
         view.stop()
 
 class CreateModal(discord.ui.Modal, title="모집 생성"):
