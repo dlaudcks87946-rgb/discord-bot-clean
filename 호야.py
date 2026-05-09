@@ -590,7 +590,7 @@ class PanelView(discord.ui.View):
 # =========================
 # 모집판 추가
 # =========================
-@bot.tree.command(name="모집추가", description="유저들이 팀원을 모집할 수 있는 패널을 생성합니다.")
+@bot.tree.command(name="모집추가", description="유저들이 팀원을 모집할 수 있는 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 모집추가(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -644,7 +644,7 @@ class RoleButton(discord.ui.Button):
         except discord.Forbidden:
             await interaction.response.send_message(f"❌ 권한이 부족합니다. 서버 설정에서 **봇의 역할 순위**를 '{self.game_name}' 역할보다 위로 올려주세요!", ephemeral=True)
 
-@bot.tree.command(name="역할설정", description="🎭 게임 역할 부여 버튼 패널을 생성합니다.")
+@bot.tree.command(name="역할설정", description="🎭 게임 역할 부여 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 역할설정(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -659,7 +659,7 @@ async def 역할설정(interaction: discord.Interaction):
 # =========================
 # 초기 설정 (역할 생성)
 # =========================
-@bot.tree.command(name="초기설정", description="⚙️ 봇 작동에 필요한 게임 역할들을 자동으로 생성합니다.")
+@bot.tree.command(name="초기설정", description="⚙️ 봇 작동에 필요한 게임 역할들을 자동으로 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 초기설정(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=True)
@@ -716,7 +716,7 @@ class NicknameView(discord.ui.View):
     async def change_nickname(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NicknameModal())
 
-@bot.tree.command(name="닉네임설정", description="📝 서버 닉네임 설정 버튼 패널을 생성합니다.")
+@bot.tree.command(name="닉네임설정", description="📝 서버 닉네임 설정 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 닉네임설정(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -822,7 +822,7 @@ async def on_voice_state_update(member, before, after):
             cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
             conn.commit()
 
-@bot.tree.command(name="음성시간", description="📊 자신의 총 음성 이용 시간을 확인합니다.")
+@bot.tree.command(name="음성시간", description="📊 자신의 총 음성 이용 시간을 확인합니다.", default_permissions=discord.Permissions(administrator=True))
 async def 음성시간(interaction: discord.Interaction):
     cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (interaction.user.id,))
     row = cursor.fetchone()
@@ -1066,7 +1066,7 @@ class AdminTimeView(discord.ui.View):
         await update_member_role(interaction.user, 0)
         await interaction.response.send_message("✅ 누적 음성 이용 시간이 초기화되었습니다.", ephemeral=True)
 
-@bot.tree.command(name="음성통계설정", description="🎙️ 음성 채널 이용 통계 패널을 생성합니다.")
+@bot.tree.command(name="음성통계설정", description="🎙️ 음성 채널 이용 통계 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 음성통계설정(interaction: discord.Interaction):
     target_channel_id = 1488708916660404246
@@ -1086,7 +1086,7 @@ async def 음성통계설정(interaction: discord.Interaction):
     await channel.send(embed=embed, view=VoiceStatView())
     await interaction.response.send_message(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.", ephemeral=True)
 
-@bot.tree.command(name="음성순위", description="🏆 서버 내 음성 이용 시간 상위 10명을 확인합니다.")
+@bot.tree.command(name="음성순위", description="🏆 서버 내 음성 이용 시간 상위 10명을 확인합니다.", default_permissions=discord.Permissions(administrator=True))
 async def 음성순위(interaction: discord.Interaction):
     # DB에서 모든 데이터 가져오기
     cursor.execute("SELECT user_id, total_seconds FROM voice_time")
@@ -1124,7 +1124,7 @@ async def 음성순위(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="시간설정", description="⚙️ 특정 유저의 누적 음성 시간을 설정합니다.")
+@bot.tree.command(name="시간설정", description="⚙️ 특정 유저의 누적 음성 시간을 설정합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.describe(member="시간을 설정할 유저", minutes="설정할 시간(분)")
 async def 시간설정(interaction: discord.Interaction, member: discord.Member, minutes: int):
     # 권한 체크: 관리자 또는 특정 역할(1488734131717148793) 보유자
@@ -1187,7 +1187,7 @@ class ReportView(discord.ui.View):
     async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ReportModal())
 
-@bot.tree.command(name="불편신고설정", description="📢 불편 신고 및 건의 버튼 패널을 생성합니다.")
+@bot.tree.command(name="불편신고설정", description="📢 불편 신고 및 건의 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 불편신고설정(interaction: discord.Interaction):
     target_channel_id = 1488781964084514926
@@ -1408,7 +1408,7 @@ class SanctionView(discord.ui.View):
             
         await interaction.response.send_modal(ResetSanctionModal())
 
-@bot.tree.command(name="제재내역설정", description="⚖️ 서버 제재 관리 버튼 패널을 생성합니다.")
+@bot.tree.command(name="제재내역설정", description="⚖️ 서버 제재 관리 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 제재내역설정(interaction: discord.Interaction):
     target_channel_id = 1489232745203765428
@@ -1528,7 +1528,7 @@ class AttendanceView(discord.ui.View):
         await self.trigger_lucky_event(interaction, is_test=True)
         await interaction.response.send_message("🧪 [테스트] 확정 당첨 이벤트가 실행되었습니다.", ephemeral=True)
 
-@bot.tree.command(name="출석체크설정", description="📅 매일매일 출석체크 버튼 패널을 생성합니다.")
+@bot.tree.command(name="출석체크설정", description="📅 매일매일 출석체크 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 출석체크설정(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1593,7 +1593,7 @@ class OutingView(discord.ui.View):
     async def outing(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(OutingModal())
 
-@bot.tree.command(name="외출신청설정", description="🏠 외출 신청 버튼 패널을 생성합니다.")
+@bot.tree.command(name="외출신청설정", description="🏠 외출 신청 버튼 패널을 생성합니다.", default_permissions=discord.Permissions(administrator=True))
 @app_commands.checks.has_permissions(administrator=True)
 async def 외출신청설정(interaction: discord.Interaction):
     target_channel_id = 1490125067323965440
