@@ -1324,6 +1324,13 @@ class SanctionModal(discord.ui.Modal, title="제재 내역 등록"):
             await interaction.channel.send(embed=embed)
             
         await interaction.response.send_message(f"✅ {member.display_name}님의 제재가 등록되었습니다. 로그는 <#{log_channel_id}> 채널로 전송되었습니다.", ephemeral=True)
+        
+        # 3초 후 확인 메시지 삭제
+        await asyncio.sleep(3)
+        try:
+            await interaction.delete_original_response()
+        except:
+            pass
 
 class ResetSanctionModal(discord.ui.Modal, title="제재 내역 초기화"):
     user_id = discord.ui.TextInput(label="대상 유저 ID", placeholder="초기화할 유저의 ID를 입력하세요.", required=True)
@@ -1367,6 +1374,13 @@ class ResetSanctionModal(discord.ui.Modal, title="제재 내역 초기화"):
             await log_channel.send(embed=embed)
             
         await interaction.response.send_message(f"✅ {member.display_name}님의 모든 제재 내역을 초기화했습니다.", ephemeral=True)
+        
+        # 3초 후 확인 메시지 삭제
+        await asyncio.sleep(3)
+        try:
+            await interaction.delete_original_response()
+        except:
+            pass
 
 class SanctionView(discord.ui.View):
     def __init__(self):
