@@ -750,6 +750,11 @@ async def on_voice_state_update(member, before, after):
                 cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (member.id,))
                 cursor.execute("UPDATE voice_time SET total_seconds = total_seconds + ? WHERE user_id = ?", (duration, member.id))
                 conn.commit()
+                
+                # 등급 업데이트 체크
+                cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (member.id,))
+                total = cursor.fetchone()[0]
+                await update_member_role(member, total)
 
         # 새로운 채널에 입장한 경우 (시작 시간 기록)
         if after.channel is not None:
@@ -805,6 +810,51 @@ async def 음성시간(ctx):
     )
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
     await ctx.send(embed=embed)
+
+# =========================
+# 음성 등급 설정
+# =========================
+VOICE_LEVELS = {
+    500 * 3600: 1490300613060460815,
+    300 * 3600: 1490300585721729104,
+    100 * 3600: 1490300554851778721,
+    10 * 3600: 1488702425798803598
+}
+
+async def update_member_role(member, total_seconds):
+    if not isinstance(member, discord.Member):
+        return
+
+    # 달성한 가장 높은 등급 찾기
+    target_role_id = None
+    sorted_thresholds = sorted(VOICE_LEVELS.keys(), reverse=True)
+    for threshold in sorted_thresholds:
+        if total_seconds >= threshold:
+            target_role_id = VOICE_LEVELS[threshold]
+            break
+
+    # 모든 등급 역할 ID 목록
+    all_level_role_ids = list(VOICE_LEVELS.values())
+    
+    # 현재 유저가 가진 등급 관련 역할들 확인
+    current_level_roles = [r for r in member.roles if r.id in all_level_role_ids]
+    
+    # 1. 대상 역할이 이미 있고, 다른 등급 역할이 없다면 통과
+    if target_role_id and len(current_level_roles) == 1 and current_level_roles[0].id == target_role_id:
+        return
+
+    try:
+        # 2. 기존 모든 등급 역할 제거
+        if current_level_roles:
+            await member.remove_roles(*current_level_roles)
+        
+        # 3. 새로운 등급 역할 부여
+        if target_role_id:
+            role = member.guild.get_role(target_role_id)
+            if role:
+                await member.add_roles(role)
+    except Exception as e:
+        print(f"등급 업데이트 오류: {e}")
 
 # =========================
 # 음성 통계 버튼 UI
@@ -868,6 +918,31 @@ class VoiceStatView(discord.ui.View):
         embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="시간 부여 (+10시간)", style=discord.ButtonStyle.success, custom_id="test_add_time_btn")
+    async def add_time_test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        add_seconds = 10 * 3600
+        cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (interaction.user.id,))
+        cursor.execute("UPDATE voice_time SET total_seconds = total_seconds + ? WHERE user_id = ?", (add_seconds, interaction.user.id))
+        conn.commit()
+        
+        cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (interaction.user.id,))
+        new_total = cursor.fetchone()[0]
+        
+        await update_member_role(interaction.user, new_total)
+        await interaction.response.send_message(f"✅ 테스트를 위해 **10시간**이 부여되었습니다. (현재: {new_total//3600}시간)", ephemeral=True)
+
+    @discord.ui.button(label="시간 초기화", style=discord.ButtonStyle.danger, custom_id="test_reset_time_btn")
+    async def reset_time_test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cursor.execute("UPDATE voice_time SET total_seconds = 0 WHERE user_id = ?", (interaction.user.id,))
+        conn.commit()
+        
+        # 추적 중인 실시간 시간도 초기화 (현재 채널에 있다면 지금부터 다시 시작)
+        if interaction.user.id in voice_tracking:
+            voice_tracking[interaction.user.id] = time.time()
+            
+        await update_member_role(interaction.user, 0)
+        await interaction.response.send_message("✅ 누적 음성 이용 시간이 초기화되었습니다.", ephemeral=True)
 
 @bot.command()
 @commands.has_permissions(administrator=True)
