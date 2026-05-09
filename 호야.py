@@ -731,6 +731,13 @@ async def on_ready():
     for (room_id,) in cursor.fetchall():
         bot.add_view(RoomView(room_id))
 
+    # 봇 재시작 시 이미 음성 채널에 있는 유저들 추적 시작
+    for guild in bot.guilds:
+        for voice_channel in guild.voice_channels:
+            for member in voice_channel.members:
+                if not member.bot:
+                    voice_tracking[member.id] = time.time()
+
     print("완전 최종 실행 완료")
 
 # =========================
@@ -910,7 +917,13 @@ class VoiceStatView(discord.ui.View):
             color=0x5865f2
         )
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        
+        # 권한 체크 (관리자 또는 특정 역할 보유자)
+        allowed_role_id = 1488734131717148793
+        is_admin = interaction.user.guild_permissions.administrator or any(role.id == allowed_role_id for role in interaction.user.roles)
+        
+        view = AdminTimeView() if is_admin else None
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
     @discord.ui.button(label="음성 순위 확인", style=discord.ButtonStyle.secondary, custom_id="check_voice_ranking_btn")
     async def check_voice_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -945,6 +958,48 @@ class VoiceStatView(discord.ui.View):
         embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+# =========================
+# 관리자 시간 설정 시스템
+# =========================
+class SetTimeModal(discord.ui.Modal, title="유저 음성 시간 설정"):
+    user_id = discord.ui.TextInput(label="유저 ID", placeholder="시간을 설정할 유저의 ID를 입력하세요.", required=True)
+    minutes = discord.ui.TextInput(label="설정할 시간 (분)", placeholder="숫자만 입력하세요 (예: 600)", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.user_id.value)
+            target_minutes = int(self.minutes.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 유저 ID와 시간은 숫자로만 입력해 주세요.", ephemeral=True)
+            return
+
+        # 해당 유저 객체 가져오기 (등급 업데이트용)
+        member = interaction.guild.get_member(target_id)
+        if not member:
+            try:
+                member = await interaction.guild.fetch_member(target_id)
+            except:
+                await interaction.response.send_message("❌ 서버에서 해당 유저를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+        new_seconds = target_minutes * 60
+        cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (target_id,))
+        cursor.execute("UPDATE voice_time SET total_seconds = ? WHERE user_id = ?", (new_seconds, target_id))
+        conn.commit()
+        
+        # 등급 업데이트
+        await update_member_role(member, new_seconds)
+        
+        await interaction.response.send_message(f"✅ {member.mention}님의 음성 시간이 **{target_minutes}분**으로 설정되었습니다.", ephemeral=True)
+
+class AdminTimeView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="[관리자] 유저 시간 설정", style=discord.ButtonStyle.danger, emoji="⚙️", custom_id="admin_set_time_btn")
+    async def set_time(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(SetTimeModal())
 
     @discord.ui.button(label="시간 부여 (+10시간)", style=discord.ButtonStyle.success, custom_id="test_add_10h_btn")
     async def add_10h_test(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1043,6 +1098,27 @@ async def 음성순위(ctx):
     embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
     
     await ctx.send(embed=embed)
+
+@bot.command()
+async def 시간설정(ctx, member: discord.Member, minutes: int):
+    # 권한 체크: 관리자 또는 특정 역할(1488734131717148793) 보유자
+    allowed_role_id = 1488734131717148793
+    has_role = any(role.id == allowed_role_id for role in ctx.author.roles)
+    
+    if not (ctx.author.guild_permissions.administrator or has_role):
+        await ctx.send("❌ 이 명령어를 사용할 권한이 없습니다.", delete_after=3)
+        await ctx.message.delete()
+        return
+
+    new_seconds = minutes * 60
+    cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (member.id,))
+    cursor.execute("UPDATE voice_time SET total_seconds = ? WHERE user_id = ?", (new_seconds, member.id))
+    conn.commit()
+    
+    # 설정된 시간에 맞춰 등급 역할 업데이트
+    await update_member_role(member, new_seconds)
+    
+    await ctx.send(f"✅ {member.mention}님의 누적 음성 시간을 **{minutes}분**으로 설정했습니다.")
 
 # =========================
 # 불편 신고 시스템
