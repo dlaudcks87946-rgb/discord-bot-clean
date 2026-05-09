@@ -857,12 +857,30 @@ async def update_member_role(member, total_seconds):
                 await member.add_roles(role)
                 
                 # 3. 승급 축하 메시지 전송 (기존에 없던 새로운 등급을 달성한 경우에만)
-                # target_role_id가 기존 역할들 중에 없었을 때만 메시지 발송
                 if not any(r.id == target_role_id for r in current_level_roles):
                     congrats_channel = member.guild.get_channel(1488701016328241203)
                     if congrats_channel:
                         hours = achieved_threshold // 3600
-                        await congrats_channel.send(f"🎉 **{member.display_name}** 님이 누적시간 **{hours}시간**을 달성하여 **{role.name}** 으로 승급되셨습니다! 진심으로 축하드립니다!")
+                        
+                        embed = discord.Embed(
+                            title="🎊 LEVEL UP - 승급을 축하드립니다! 🎊",
+                            description=f"**{member.mention}** 님이 새로운 경지에 도달하셨습니다!",
+                            color=0xf1c40f  # 골드 색상
+                        )
+                        embed.add_field(name="🏆 달성 등급", value=f"**{role.name}**", inline=True)
+                        embed.add_field(name="⏱️ 누적 이용 시간", value=f"**{hours}시간**", inline=True)
+                        
+                        # 고급스러운 효과를 위해 썸네일에 유저 아바타 설정
+                        embed.set_thumbnail(url=member.display_avatar.url)
+                        
+                        # 하단 문구
+                        embed.set_footer(text="호야 프리미엄 음성 통계 시스템 • 꾸준한 활동에 감사드립니다!", icon_url=member.guild.icon.url if member.guild.icon else None)
+                        embed.timestamp = discord.utils.utcnow()
+                        
+                        # 화려한 배너 이미지 (고급스러운 골드 테두리 느낌의 이미지)
+                        embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png") # 임시 고화질 이미지 URL
+                        
+                        await congrats_channel.send(content=member.mention, embed=embed)
     except Exception as e:
         print(f"등급 업데이트 오류: {e}")
 
