@@ -91,6 +91,13 @@ CREATE TABLE IF NOT EXISTS sanctions (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS attendance (
+    user_id INTEGER PRIMARY KEY,
+    last_date TEXT
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -733,6 +740,7 @@ async def on_ready():
     bot.add_view(ReportView()) # 불편 신고 뷰 등록
     bot.add_view(OutingView()) # 외출 신청 뷰 등록
     bot.add_view(SanctionView()) # 제재 내역 뷰 등록
+    bot.add_view(AttendanceView()) # 출석 체크 뷰 등록
     cursor.execute("SELECT message_id FROM panels")
     for (msg_id,) in cursor.fetchall():
         bot.add_view(PanelView())
@@ -1440,6 +1448,88 @@ async def 제재내역설정(ctx):
     await asyncio.sleep(3)
     try: await msg.delete()
     except: pass
+
+# =========================
+# 출석체크 시스템
+# =========================
+class AttendanceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def trigger_lucky_event(self, interaction: discord.Interaction):
+        log_channel_id = 1489253932000743485
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        
+        # 1. 관리자 채널 알림
+        if log_channel:
+            log_embed = discord.Embed(
+                title="💎 0.1% 확률 당첨 발생!",
+                description=f"**{interaction.user.mention}** 님이 출석체크 중 초희귀 확률에 당첨되었습니다!",
+                color=0x00ffff,
+                timestamp=discord.utils.utcnow()
+            )
+            log_embed.set_thumbnail(url=interaction.user.display_avatar.url)
+            await log_channel.send(embed=log_embed)
+
+        # 2. 공개 채널 알림 (모두가 볼 수 있게)
+        public_embed = discord.Embed(
+            title="🎊 초대박 행운아 탄생! 🎊",
+            description=(
+                f"축하합니다! **{interaction.user.mention}** 님이\n"
+                f"**0.1%**의 확률을 뚫고 특별한 행운에 당첨되셨습니다!\n\n"
+                f"오늘 하루는 정말 운이 좋은 날이 되겠네요! ✨"
+            ),
+            color=0xffd700
+        )
+        public_embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png") # 이전에 생성한 배너 재사용
+        await interaction.channel.send(content=f"@everyone {interaction.user.mention} 님의 행운을 축하해주세요!", embed=public_embed)
+
+    @discord.ui.button(label="출석체크 하기", style=discord.ButtonStyle.success, emoji="✅", custom_id="attendance_check_btn")
+    async def attendance(self, interaction: discord.Interaction, button: discord.ui.Button):
+        today = time.strftime("%Y-%m-%d")
+        cursor.execute("SELECT last_date FROM attendance WHERE user_id = ?", (interaction.user.id,))
+        row = cursor.fetchone()
+
+        if row and row[0] == today:
+            await interaction.response.send_message("❌ 오늘은 이미 출석체크를 완료하셨습니다. 내일 다시 시도해주세요!", ephemeral=True)
+            return
+
+        # DB 업데이트
+        cursor.execute("INSERT OR IGNORE INTO attendance (user_id, last_date) VALUES (?, '')", (interaction.user.id,))
+        cursor.execute("UPDATE attendance SET last_date = ? WHERE user_id = ?", (today, interaction.user.id))
+        conn.commit()
+
+        # 0.1% 확률 계산 (0~999 중 0이 나오면 당첨)
+        is_lucky = random.randint(0, 999) == 0
+        
+        if is_lucky:
+            await self.trigger_lucky_event(interaction)
+            await interaction.response.send_message("✨ 대박! 0.1% 확률에 당첨되셨습니다! 모두에게 알림이 전송되었습니다.", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"📅 출석체크 완료! 오늘도 즐거운 시간 보내세요.", ephemeral=True)
+
+    @discord.ui.button(label="[테스트] 0.1% 확정 당첨", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="test_attendance_lucky_btn")
+    async def test_lucky(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 테스트용 버튼은 시간 제한 없이 즉시 실행
+        await self.trigger_lucky_event(interaction)
+        await interaction.response.send_message("🧪 [테스트] 확정 당첨 이벤트가 실행되었습니다.", ephemeral=True)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 출석체크설정(ctx):
+    embed = discord.Embed(
+        title="📅 매일매일 출석체크",
+        description=(
+            "아래 버튼을 눌러 출석체크를 해주세요!\n"
+            "하루에 한 번만 가능하며, **0.1%**의 확률로 특별한 행운이 찾아옵니다.\n\n"
+            "과연 오늘 최고의 행운아는 누가 될까요?"
+        ),
+        color=0x2ecc71
+    )
+    embed.set_footer(text="매일 자정에 초기화됩니다.")
+    
+    await ctx.send(embed=embed, view=AttendanceView())
+    await ctx.message.delete()
 
 # =========================
 # 외출 신청 시스템
