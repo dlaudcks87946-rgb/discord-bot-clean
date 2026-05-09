@@ -722,6 +722,7 @@ async def on_ready():
     bot.add_view(RoleAssignmentView()) # 역할 부여 뷰 등록
     bot.add_view(NicknameView()) # 닉네임 변경 뷰 등록
     bot.add_view(VoiceStatView()) # 음성 통계 뷰 등록
+    bot.add_view(ReportView()) # 불편 신고 뷰 등록
     cursor.execute("SELECT message_id FROM panels")
     for (msg_id,) in cursor.fetchall():
         bot.add_view(PanelView())
@@ -873,8 +874,6 @@ async def update_member_role(member, total_seconds):
                         # 고급스러운 효과를 위해 썸네일에 유저 아바타 설정
                         embed.set_thumbnail(url=member.display_avatar.url)
                         
-                        # 하단 문구
-                        embed.set_footer(text="호야 프리미엄 음성 통계 시스템 • 꾸준한 활동에 감사드립니다!", icon_url=member.guild.icon.url if member.guild.icon else None)
                         embed.timestamp = discord.utils.utcnow()
                         
                         # 화려한 배너 이미지 (고급스러운 골드 테두리 느낌의 이미지)
@@ -997,7 +996,15 @@ async def 음성통계설정(ctx):
     embed.set_footer(text="자신에게만 보이는 메시지로 안내됩니다.")
     
     await channel.send(embed=embed, view=VoiceStatView())
-    await ctx.send(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.")
+    
+    # 명령어 및 확인 메시지 삭제
+    await ctx.message.delete()
+    confirm_msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.")
+    await asyncio.sleep(3)
+    try:
+        await confirm_msg.delete()
+    except:
+        pass
 
 @bot.command()
 async def 음성순위(ctx):
@@ -1036,6 +1043,79 @@ async def 음성순위(ctx):
     embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
     
     await ctx.send(embed=embed)
+
+# =========================
+# 불편 신고 시스템
+# =========================
+class ReportModal(discord.ui.Modal, title="불편 신고 접수"):
+    content = discord.ui.TextInput(
+        label="신고 및 불편 사항",
+        style=discord.TextStyle.paragraph,
+        placeholder="어떤 점이 불편하셨나요? 상세히 적어주시면 빠른 처리에 도움이 됩니다.",
+        required=True,
+        min_length=10,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        report_channel_id = 1489253932000743485
+        channel = bot.get_channel(report_channel_id)
+        
+        if not channel:
+            await interaction.response.send_message("❌ 신고 접수 채널을 찾을 수 없습니다. 관리자에게 문의하세요.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🚨 새로운 불편 신고 접수",
+            color=0xff4654, # 레드 계열
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="👤 신고자", value=f"{interaction.user.mention} ({interaction.user.id})", inline=False)
+        embed.add_field(name="📝 내용", value=self.content.value, inline=False)
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.set_footer(text="신고 시스템 • 신속하게 확인해 주세요.")
+
+        await channel.send(embed=embed)
+        await interaction.response.send_message("✅ 신고가 정상적으로 접수되었습니다. 관리자가 확인 후 처리해 드리겠습니다.", ephemeral=True)
+
+class ReportView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="불편 신고하기", style=discord.ButtonStyle.danger, emoji="📢", custom_id="report_complaint_btn")
+    async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ReportModal())
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 불편신고설정(ctx):
+    target_channel_id = 1488781964084514926
+    channel = bot.get_channel(target_channel_id)
+    
+    if not channel:
+        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title="📢 불편 신고 및 건의",
+        description=(
+            "서버 이용 중 불편한 점이나 건의하고 싶은 사항이 있으신가요?\n"
+            "아래 버튼을 눌러 신고를 접수해 주세요.\n\n"
+            "접수된 내용은 관리자에게 직접 전달되며, 신속하게 확인하겠습니다."
+        ),
+        color=0x2b2d31
+    )
+    embed.set_footer(text="신고 내용은 관리자에게만 공개됩니다.")
+    
+    await channel.send(embed=embed, view=ReportView())
+    await ctx.message.delete()
+    
+    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 불편 신고 버튼을 생성했습니다.")
+    await asyncio.sleep(3)
+    try:
+        await msg.delete()
+    except:
+        pass
 
 # =========================
 # 이모지 역할 부여 시스템
