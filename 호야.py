@@ -827,10 +827,12 @@ async def update_member_role(member, total_seconds):
 
     # 달성한 가장 높은 등급 찾기
     target_role_id = None
+    achieved_threshold = 0
     sorted_thresholds = sorted(VOICE_LEVELS.keys(), reverse=True)
     for threshold in sorted_thresholds:
         if total_seconds >= threshold:
             target_role_id = VOICE_LEVELS[threshold]
+            achieved_threshold = threshold
             break
 
     # 모든 등급 역할 ID 목록
@@ -839,20 +841,28 @@ async def update_member_role(member, total_seconds):
     # 현재 유저가 가진 등급 관련 역할들 확인
     current_level_roles = [r for r in member.roles if r.id in all_level_role_ids]
     
-    # 1. 대상 역할이 이미 있고, 다른 등급 역할이 없다면 통과
-    if target_role_id and len(current_level_roles) == 1 and current_level_roles[0].id == target_role_id:
+    # 대상 역할이 이미 있고, 다른 등급 역할이 없다면 이미 승급된 상태이므로 종료
+    if target_role_id and any(r.id == target_role_id for r in current_level_roles) and len(current_level_roles) == 1:
         return
 
     try:
-        # 2. 기존 모든 등급 역할 제거
+        # 1. 기존 모든 등급 역할 제거
         if current_level_roles:
             await member.remove_roles(*current_level_roles)
         
-        # 3. 새로운 등급 역할 부여
+        # 2. 새로운 등급 역할 부여
         if target_role_id:
             role = member.guild.get_role(target_role_id)
             if role:
                 await member.add_roles(role)
+                
+                # 3. 승급 축하 메시지 전송 (기존에 없던 새로운 등급을 달성한 경우에만)
+                # target_role_id가 기존 역할들 중에 없었을 때만 메시지 발송
+                if not any(r.id == target_role_id for r in current_level_roles):
+                    congrats_channel = member.guild.get_channel(1488701016328241203)
+                    if congrats_channel:
+                        hours = achieved_threshold // 3600
+                        await congrats_channel.send(f"🎉 **{member.display_name}** 님이 누적시간 **{hours}시간**을 달성하여 **{role.name}** 으로 승급되셨습니다! 진심으로 축하드립니다!")
     except Exception as e:
         print(f"등급 업데이트 오류: {e}")
 
@@ -919,9 +929,16 @@ class VoiceStatView(discord.ui.View):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="시간 부여 (+10시간)", style=discord.ButtonStyle.success, custom_id="test_add_time_btn")
-    async def add_time_test(self, interaction: discord.Interaction, button: discord.ui.Button):
-        add_seconds = 10 * 3600
+    @discord.ui.button(label="시간 부여 (+10시간)", style=discord.ButtonStyle.success, custom_id="test_add_10h_btn")
+    async def add_10h_test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._add_time(interaction, 10)
+
+    @discord.ui.button(label="시간 부여 (+100시간)", style=discord.ButtonStyle.success, custom_id="test_add_100h_btn")
+    async def add_100h_test(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._add_time(interaction, 100)
+
+    async def _add_time(self, interaction, hours):
+        add_seconds = hours * 3600
         cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (interaction.user.id,))
         cursor.execute("UPDATE voice_time SET total_seconds = total_seconds + ? WHERE user_id = ?", (add_seconds, interaction.user.id))
         conn.commit()
@@ -930,7 +947,7 @@ class VoiceStatView(discord.ui.View):
         new_total = cursor.fetchone()[0]
         
         await update_member_role(interaction.user, new_total)
-        await interaction.response.send_message(f"✅ 테스트를 위해 **10시간**이 부여되었습니다. (현재: {new_total//3600}시간)", ephemeral=True)
+        await interaction.response.send_message(f"✅ 테스트를 위해 **{hours}시간**이 부여되었습니다. (현재: {new_total//3600}시간)", ephemeral=True)
 
     @discord.ui.button(label="시간 초기화", style=discord.ButtonStyle.danger, custom_id="test_reset_time_btn")
     async def reset_time_test(self, interaction: discord.Interaction, button: discord.ui.Button):
