@@ -723,5 +723,56 @@ async def on_voice_state_update(member, before, after):
             cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
             conn.commit()
 
+# =========================
+# 이모지 역할 부여 시스템
+# =========================
+CHECK_ROLE_ID = 1488695398682988574
+CHECK_EMOJI = "✅"
+TARGET_CHANNEL_ID = 1488706365026340864
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.channel_id != TARGET_CHANNEL_ID:
+        return
+
+    if str(payload.emoji) == CHECK_EMOJI:
+        guild = bot.get_guild(payload.guild_id)
+        if not guild: return
+        
+        role = guild.get_role(CHECK_ROLE_ID)
+        if not role: return
+        
+        member = guild.get_member(payload.user_id)
+        if not member or member.bot: return
+        
+        try:
+            await member.add_roles(role)
+        except discord.Forbidden:
+            pass
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.channel_id != TARGET_CHANNEL_ID:
+        return
+
+    if str(payload.emoji) == CHECK_EMOJI:
+        guild = bot.get_guild(payload.guild_id)
+        if not guild: return
+        
+        role = guild.get_role(CHECK_ROLE_ID)
+        if not role: return
+        
+        member = guild.get_member(payload.user_id)
+        if not member:
+            try:
+                member = await guild.fetch_member(payload.user_id)
+            except:
+                return
+                
+        try:
+            await member.remove_roles(role)
+        except discord.Forbidden:
+            pass
+
 keep_alive()
 bot.run(os.getenv("TOKEN"))
