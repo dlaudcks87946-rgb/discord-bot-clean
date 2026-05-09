@@ -804,6 +804,40 @@ class VoiceStatView(discord.ui.View):
         embed.set_thumbnail(url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @discord.ui.button(label="음성 순위 확인", style=discord.ButtonStyle.secondary, custom_id="check_voice_ranking_btn")
+    async def check_voice_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cursor.execute("SELECT user_id, total_seconds FROM voice_time")
+        db_data = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        current_time = time.time()
+        for u_id, join_time in voice_tracking.items():
+            elapsed = int(current_time - join_time)
+            db_data[u_id] = db_data.get(u_id, 0) + elapsed
+            
+        sorted_data = sorted(db_data.items(), key=lambda x: x[1], reverse=True)[:10]
+        
+        if not sorted_data:
+            await interaction.response.send_message("❌ 기록된 데이터가 없습니다.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🏆 음성 채널 이용 시간 순위 (TOP 10)",
+            description="이 서버에서 가장 오래 대화한 유저분들입니다!",
+            color=0xffd700
+        )
+        
+        ranking_text = ""
+        for i, (u_id, total_seconds) in enumerate(sorted_data, 1):
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "👤"
+            ranking_text += f"{medal} **{i}위**: <@{u_id}> - {hours}시간 {minutes}분\n"
+            
+        embed.add_field(name="순위표", value=ranking_text, inline=False)
+        embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 음성통계설정(ctx):
