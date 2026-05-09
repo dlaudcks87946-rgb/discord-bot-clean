@@ -1457,7 +1457,7 @@ class AttendanceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def trigger_lucky_event(self, interaction: discord.Interaction):
+    async def trigger_lucky_event(self, interaction: discord.Interaction, is_test: bool = False):
         log_channel_id = 1489253932000743485
         log_channel = interaction.guild.get_channel(log_channel_id)
         
@@ -1472,24 +1472,24 @@ class AttendanceView(discord.ui.View):
             log_embed.set_thumbnail(url=interaction.user.display_avatar.url)
             await log_channel.send(embed=log_embed)
 
-        # 2. 공개 채널 알림 (모두가 볼 수 있게, 알람은 울리지 않도록 설정)
-        public_embed = discord.Embed(
-            title="🎊 초대박 행운아 탄생! 🎊",
-            description=(
-                f"축하합니다! **{interaction.user.mention}** 님이\n"
-                f"**0.1%**의 확률을 뚫고 특별한 행운에 당첨되셨습니다!\n\n"
-                f"오늘 하루는 정말 운이 좋은 날이 되겠네요! ✨"
-            ),
-            color=0xffd700
-        )
-        public_embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
-        
-        # allowed_mentions를 사용하여 @everyone 텍스트는 보이지만 알람은 울리지 않게 설정
-        await interaction.channel.send(
-            content=f"@everyone {interaction.user.mention} 님의 행운을 축하해주세요!", 
-            embed=public_embed,
-            allowed_mentions=discord.AllowedMentions.none()
-        )
+        # 2. 공개 채널 알림 (모두가 볼 수 있게, 테스트가 아닐 때만 발송)
+        if not is_test:
+            public_embed = discord.Embed(
+                title="🎊 초대박 행운아 탄생! 🎊",
+                description=(
+                    f"축하합니다! **{interaction.user.mention}** 님이\n"
+                    f"**0.1%**의 확률을 뚫고 특별한 행운에 당첨되셨습니다!\n\n"
+                    f"오늘 하루는 정말 운이 좋은 날이 되겠네요! ✨"
+                ),
+                color=0xffd700
+            )
+            public_embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
+            
+            await interaction.channel.send(
+                content=f"@everyone {interaction.user.mention} 님의 행운을 축하해주세요!", 
+                embed=public_embed,
+                allowed_mentions=discord.AllowedMentions.none()
+            )
 
     @discord.ui.button(label="출석체크 하기", style=discord.ButtonStyle.success, emoji="✅", custom_id="attendance_check_btn")
     async def attendance(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1541,7 +1541,7 @@ class AttendanceView(discord.ui.View):
     @discord.ui.button(label="[테스트] 0.1% 확정 당첨", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="test_attendance_lucky_btn")
     async def test_lucky(self, interaction: discord.Interaction, button: discord.ui.Button):
         # 테스트용 버튼은 시간 제한 없이 즉시 실행
-        await self.trigger_lucky_event(interaction)
+        await self.trigger_lucky_event(interaction, is_test=True)
         await interaction.response.send_message("🧪 [테스트] 확정 당첨 이벤트가 실행되었습니다.", ephemeral=True)
 
 @bot.command()
