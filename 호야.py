@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 import sqlite3
 import os
@@ -80,6 +80,14 @@ cursor.execute("""
 CREATE TABLE IF NOT EXISTS voice_time (
     user_id INTEGER PRIMARY KEY,
     total_seconds INTEGER DEFAULT 0
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS sanctions (
+    user_id INTEGER PRIMARY KEY,
+    count INTEGER DEFAULT 0,
+    expire_at INTEGER DEFAULT 0
 )
 """)
 
@@ -194,7 +202,7 @@ def make_embed(room_id, guild=None):
         if owner:
             embed.set_author(name=f"{owner.display_name}님의 모집", icon_url=owner.display_avatar.url)
     
-    embed.set_footer(text="호야 모집 시스템 • 즐거운 게임 되세요!")
+    embed.set_footer(text="파티 모집 시스템 • 즐거운 게임 되세요!")
     embed.timestamp = discord.utils.utcnow()
 
     return embed
@@ -578,12 +586,12 @@ class PanelView(discord.ui.View):
 @commands.has_permissions(administrator=True)
 async def 모집추가(ctx):
     embed = discord.Embed(
-        title="🎮 호야 모집판",
+        title="🎮 파티 모집",
         description="함께 게임할 팀원을 모집해보세요!\n아래 버튼을 눌러 모집을 시작할 수 있습니다.",
         color=0x5865f2
     )
     embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1494319173940023411/1501615259549565102/18b6c8f6-c2d8-4eba-8dda-2aba45b4bba5.png?ex=69fcb7b0&is=69fb6630&hm=1d058fe2f297afbb1b124deb8f7bac4dcc4bfdea8999f4bfd2f7c1a6f07fe952&")  # 대표 아이콘
-    embed.set_footer(text="호야 모집 시스템 • 매너 게임 부탁드립니다!")
+    embed.set_footer(text="파티 모집 시스템 • 매너 게임 부탁드립니다!")
     
     msg = await ctx.send(embed=embed, view=PanelView())
 
@@ -724,6 +732,7 @@ async def on_ready():
     bot.add_view(VoiceStatView()) # 음성 통계 뷰 등록
     bot.add_view(ReportView()) # 불편 신고 뷰 등록
     bot.add_view(OutingView()) # 외출 신청 뷰 등록
+    bot.add_view(SanctionView()) # 제재 내역 뷰 등록
     cursor.execute("SELECT message_id FROM panels")
     for (msg_id,) in cursor.fetchall():
         bot.add_view(PanelView())
@@ -740,6 +749,9 @@ async def on_ready():
                     voice_tracking[member.id] = time.time()
 
     print("완전 최종 실행 완료")
+    
+    if not check_sanction_expirations.is_running():
+        check_sanction_expirations.start()
 
 # =========================
 # 음성채널 이용 시간 측정
@@ -925,6 +937,13 @@ class VoiceStatView(discord.ui.View):
         
         view = AdminTimeView() if is_admin else None
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+        # 5분(300초) 후 메시지 자동 삭제
+        await asyncio.sleep(300)
+        try:
+            await interaction.delete_original_response()
+        except:
+            pass
 
     @discord.ui.button(label="음성 순위 확인", style=discord.ButtonStyle.secondary, custom_id="check_voice_ranking_btn")
     async def check_voice_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1195,6 +1214,165 @@ async def 불편신고설정(ctx):
         pass
 
 # =========================
+# 제재 내역 시스템 (자동 만료 포함)
+# =========================
+SANCTION_ROLES = {
+    1: 1502707931655966871,
+    2: 1502707989318992115,
+    3: 1502708016955261018
+}
+
+async def update_sanction_role(guild, member, count):
+    all_ids = list(SANCTION_ROLES.values())
+    current_roles = [r for r in member.roles if r.id in all_ids]
+    try:
+        if current_roles:
+            await member.remove_roles(*current_roles)
+        
+        target_id = SANCTION_ROLES.get(count)
+        if target_id:
+            role = guild.get_role(target_id)
+            if role:
+                await member.add_roles(role)
+    except:
+        pass
+
+@tasks.loop(minutes=10)
+async def check_sanction_expirations():
+    now = int(time.time())
+    cursor.execute("SELECT user_id, count FROM sanctions WHERE expire_at > 0 AND expire_at <= ?", (now,))
+    rows = cursor.fetchall()
+    
+    for user_id, count in rows:
+        for guild in bot.guilds:
+            member = guild.get_member(user_id)
+            if not member:
+                try: member = await guild.fetch_member(user_id)
+                except: continue
+                
+            if count == 1 or count == 3:
+                # 1회차/3회차 만료 -> 역할 제거
+                await update_sanction_role(guild, member, 0)
+                cursor.execute("UPDATE sanctions SET expire_at = 0 WHERE user_id = ?", (user_id,))
+            elif count == 2:
+                # 2회차 만료 -> 1회차로 하향 (7일 추가 연장)
+                await update_sanction_role(guild, member, 1)
+                new_expire = int(time.time()) + (7 * 86400)
+                cursor.execute("UPDATE sanctions SET count = 1, expire_at = ? WHERE user_id = ?", (new_expire, user_id))
+        conn.commit()
+
+class SanctionModal(discord.ui.Modal, title="제재 내역 등록"):
+    user_id = discord.ui.TextInput(label="대상 유저 ID", placeholder="제재할 유저의 ID를 입력하세요.", required=True)
+    duration = discord.ui.TextInput(label="제재 시간 (안내용)", placeholder="예: 7일, 30일 등", required=True)
+    reason = discord.ui.TextInput(label="제재 사유", style=discord.TextStyle.paragraph, placeholder="상세 사유를 입력하세요.", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.user_id.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 유저 ID는 숫자로만 입력해 주세요.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(target_id)
+        if not member:
+            try: member = await interaction.guild.fetch_member(target_id)
+            except:
+                await interaction.response.send_message("❌ 서버에서 유저를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+        # DB 업데이트
+        cursor.execute("INSERT OR IGNORE INTO sanctions (user_id, count, expire_at) VALUES (?, 0, 0)", (target_id,))
+        cursor.execute("UPDATE sanctions SET count = count + 1 WHERE user_id = ?", (target_id,))
+        conn.commit()
+
+        cursor.execute("SELECT count FROM sanctions WHERE user_id = ?", (target_id,))
+        new_count = cursor.fetchone()[0]
+
+        # 만료 시간 계산
+        now = int(time.time())
+        if new_count == 1: expire_in = 7 * 86400
+        elif new_count == 2: expire_in = 7 * 86400
+        elif new_count == 3: expire_in = 30 * 86400
+        else: expire_in = 30 * 86400 # 3회 이상은 30일 유지
+        
+        expire_at = now + expire_in
+        cursor.execute("UPDATE sanctions SET expire_at = ? WHERE user_id = ?", (expire_at, target_id))
+        conn.commit()
+
+        # 역할 부여
+        await update_sanction_role(interaction.guild, member, new_count)
+
+        # 결과 로그 전송
+        log_channel_id = 1489232745203765428
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        
+        embed = discord.Embed(
+            title="🔨 제재 내역 등록 및 자동 만료 설정",
+            color=0x2b2d31,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="👤 대상자", value=f"{member.mention} ({target_id})", inline=True)
+        embed.add_field(name="🔢 누적 횟수", value=f"**{new_count}회**", inline=True)
+        embed.add_field(name="📅 만료 예정", value=f"<t:{expire_at}:R>", inline=True)
+        embed.add_field(name="📝 사유", value=f"```\n{self.reason.value}\n```", inline=False)
+        embed.set_footer(text=f"처리 관리자: {interaction.user.display_name}")
+
+        if log_channel:
+            await log_channel.send(embed=embed)
+        else:
+            # 채널을 찾을 수 없는 경우 현재 채널에 백업으로 전송
+            await interaction.channel.send(embed=embed)
+            
+        await interaction.response.send_message(f"✅ {member.display_name}님의 제재가 등록되었습니다. 로그는 <#{log_channel_id}> 채널로 전송되었습니다.", ephemeral=True)
+
+class SanctionView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="제재 내역 등록", style=discord.ButtonStyle.danger, emoji="⚖️", custom_id="admin_sanction_reg_btn")
+    async def sanction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 권한 체크 (관리자 또는 특정 역할 보유자)
+        allowed_role_id = 1488734131717148793
+        is_admin = interaction.user.guild_permissions.administrator or any(role.id == allowed_role_id for role in interaction.user.roles)
+        
+        if not is_admin:
+            await interaction.response.send_message("❌ 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+            
+        await interaction.response.send_modal(SanctionModal())
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 제재내역설정(ctx):
+    target_channel_id = 1489203523102183514
+    channel = bot.get_channel(target_channel_id)
+    
+    if not channel:
+        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title="⚖️ 서버 제재 관리 시스템",
+        description=(
+            "관리자 전용 제재 등록 패널입니다.\n"
+            "아래 버튼을 눌러 유저의 제재 내역을 등록하고 역할을 부여할 수 있습니다.\n\n"
+            "**누적 제재 단계:**\n"
+            "1회: 경고 역할 부여\n"
+            "2회: 정지 역할 부여\n"
+            "3회: 영구 제한 역할 부여"
+        ),
+        color=0x2b2d31
+    )
+    
+    await channel.send(embed=embed, view=SanctionView())
+    await ctx.message.delete()
+    
+    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 제재 관리 버튼을 생성했습니다.")
+    await asyncio.sleep(3)
+    try: await msg.delete()
+    except: pass
+
+# =========================
 # 외출 신청 시스템
 # =========================
 class OutingModal(discord.ui.Modal, title="외출 신청서 작성"):
@@ -1259,7 +1437,7 @@ async def 외출신청설정(ctx):
             "**작성 항목:**\n"
             "1. 외출 기간 (정확한 날짜 및 시간)\n"
             "2. 외출 사유\n\n"
-            "제출된 신청서는 관리자가 확인 후 승인해 드립니다."
+            "제출된 신청서는 관리자한테 전송됩니다."
         ),
         color=0x2b2d31
     )
