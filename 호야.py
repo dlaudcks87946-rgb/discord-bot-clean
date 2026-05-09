@@ -1541,11 +1541,6 @@ class AttendanceView(discord.ui.View):
         except:
             pass
 
-    @discord.ui.button(label="[테스트] 0.1% 확정 당첨", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="test_attendance_lucky_btn")
-    async def test_lucky(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # 테스트용 버튼은 시간 제한 없이 즉시 실행
-        await self.trigger_lucky_event(interaction, is_test=True)
-        await interaction.response.send_message("🧪 [테스트] 확정 당첨 이벤트가 실행되었습니다.", ephemeral=True)
 
 @bot.tree.command(name="출석체크설정", description="📅 매일매일 출석체크 버튼 패널을 생성합니다.")
 @app_commands.default_permissions(administrator=True)
