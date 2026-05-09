@@ -230,14 +230,45 @@ async def handle_action(interaction, room_id, choice):
                 except:
                     pass
 
+        # 닉네임에서 [관전] 제거 (참가 시)
+        if interaction.user.display_name.startswith("[관전]"):
+            try:
+                new_nick = interaction.user.display_name.replace("[관전] ", "").replace("[관전]", "")
+                await interaction.user.edit(nick=new_nick)
+            except:
+                pass
+
     elif choice == "대기":
         add_user(room_id, interaction.user.id, "대기")
 
+        # 닉네임에서 [관전] 제거
+        if interaction.user.display_name.startswith("[관전]"):
+            try:
+                new_nick = interaction.user.display_name.replace("[관전] ", "").replace("[관전]", "")
+                await interaction.user.edit(nick=new_nick)
+            except:
+                pass
+
     elif choice == "관전":
         add_user(room_id, interaction.user.id, "관전")
+        
+        # 닉네임 앞에 [관전] 추가
+        if not interaction.user.display_name.startswith("[관전]"):
+            try:
+                await interaction.user.edit(nick=f"[관전] {interaction.user.display_name}")
+            except:
+                pass
 
     elif choice == "나가기":
         remove_user(room_id, interaction.user.id)
+
+        # 닉네임에서 [관전] 제거
+        if interaction.user.display_name.startswith("[관전]"):
+            try:
+                new_nick = interaction.user.display_name.replace("[관전] ", "").replace("[관전]", "")
+                await interaction.user.edit(nick=new_nick)
+            except:
+                pass
 
         if interaction.user.id == owner_id:
             # 방장이 나간 경우 다음 방장 선정 (참가자 -> 대기자 순)
