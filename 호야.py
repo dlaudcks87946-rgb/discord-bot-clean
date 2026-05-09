@@ -8,6 +8,7 @@ from threading import Thread
 import random
 import asyncio
 import time
+import datetime
 
 app = Flask('')
 
@@ -27,7 +28,7 @@ intents.message_content = True
 intents.voice_states = True
 intents.members = True
 
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 # =========================
 # DB
@@ -589,23 +590,19 @@ class PanelView(discord.ui.View):
 # =========================
 # 모집판 추가
 # =========================
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 모집추가(ctx):
+@bot.tree.command(name="모집추가", description="유저들이 팀원을 모집할 수 있는 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 모집추가(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎮 파티 모집",
         description="함께 게임할 팀원을 모집해보세요!\n아래 버튼을 눌러 모집을 시작할 수 있습니다.",
         color=0x5865f2
     )
-    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1494319173940023411/1501615259549565102/18b6c8f6-c2d8-4eba-8dda-2aba45b4bba5.png?ex=69fcb7b0&is=69fb6630&hm=1d058fe2f297afbb1b124deb8f7bac4dcc4bfdea8999f4bfd2f7c1a6f07fe952&")  # 대표 아이콘
+    embed.set_thumbnail(url="https://cdn.discordapp.com/attachments/1494319173940023411/1501615259549565102/18b6c8f6-c2d8-4eba-8dda-2aba45b4bba5.png?ex=69fcb7b0&is=69fb6630&hm=1d058fe2f297afbb1b124deb8f7bac4dcc4bfdea8999f4bfd2f7c1a6f07fe952&")
     embed.set_footer(text="파티 모집 시스템 • 매너 게임 부탁드립니다!")
     
-    msg = await ctx.send(embed=embed, view=PanelView())
-
-    cursor.execute("INSERT INTO panels VALUES (?, ?)", (ctx.channel.id, msg.id))
-    conn.commit()
-
-    await ctx.message.delete()
+    await interaction.channel.send(embed=embed, view=PanelView())
+    await interaction.response.send_message("✅ 모집 패널을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 역할 부여 시스템
@@ -647,26 +644,28 @@ class RoleButton(discord.ui.Button):
         except discord.Forbidden:
             await interaction.response.send_message(f"❌ 권한이 부족합니다. 서버 설정에서 **봇의 역할 순위**를 '{self.game_name}' 역할보다 위로 올려주세요!", ephemeral=True)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 역할설정(ctx):
+@bot.tree.command(name="역할설정", description="🎭 게임 역할 부여 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 역할설정(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎭 게임 역할 부여",
         description="아래 버튼을 클릭하여 관심 있는 게임의 역할을 받을 수 있습니다.\n역할을 받으면 해당 게임의 **모집 알림**을 받을 수 있습니다!",
         color=0x2b2d31
     )
     embed.set_footer(text="버튼을 다시 누르면 역할을 취소할 수 있습니다.")
-    await ctx.send(embed=embed, view=RoleAssignmentView())
-    await ctx.message.delete()
+    await interaction.channel.send(embed=embed, view=RoleAssignmentView())
+    await interaction.response.send_message("✅ 역할 부여 패널을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 초기 설정 (역할 생성)
 # =========================
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 초기설정(ctx):
+@bot.tree.command(name="초기설정", description="⚙️ 봇 작동에 필요한 게임 역할들을 자동으로 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 초기설정(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    guild = interaction.guild
     # "리그" 역할을 "리그오브레전드"로 미리 변경 (유저 정보 유지)
-    old_role = discord.utils.get(ctx.guild.roles, name="리그")
+    old_role = discord.utils.get(guild.roles, name="리그")
     if old_role:
         await old_role.edit(name="리그오브레전드")
 
@@ -675,8 +674,8 @@ async def 초기설정(ctx):
     existed = []
 
     for role_name in target_roles:
-        if not discord.utils.get(ctx.guild.roles, name=role_name):
-            await ctx.guild.create_role(name=role_name, mentionable=True)
+        if not discord.utils.get(guild.roles, name=role_name):
+            await guild.create_role(name=role_name, mentionable=True)
             created.append(role_name)
         else:
             existed.append(role_name)
@@ -687,8 +686,7 @@ async def 초기설정(ctx):
     if existed:
         res += f"- 이미 존재함: {', '.join(existed)}\n"
     
-    await ctx.send(res, delete_after=10)
-    await ctx.message.delete()
+    await interaction.followup.send(res, ephemeral=True)
 
 # =========================
 # 닉네임 변경 시스템
@@ -718,16 +716,16 @@ class NicknameView(discord.ui.View):
     async def change_nickname(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(NicknameModal())
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 닉네임설정(ctx):
+@bot.tree.command(name="닉네임설정", description="📝 서버 닉네임 설정 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 닉네임설정(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📝 서버 닉네임 설정",
         description="아래 버튼을 눌러 이 서버에서 사용할 닉네임을 변경할 수 있습니다.",
         color=0x2b2d31
     )
-    await ctx.send(embed=embed, view=NicknameView())
-    await ctx.message.delete()
+    await interaction.channel.send(embed=embed, view=NicknameView())
+    await interaction.response.send_message("✅ 닉네임 설정 패널을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 자동 복구
@@ -760,6 +758,13 @@ async def on_ready():
     
     if not check_sanction_expirations.is_running():
         check_sanction_expirations.start()
+        
+    # 슬래시 명령어 동기화
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ 슬래시 명령어 {len(synced)}개 동기화 완료")
+    except Exception as e:
+        print(f"❌ 슬래시 명령어 동기화 오류: {e}")
 
 # =========================
 # 음성채널 이용 시간 측정
@@ -817,28 +822,7 @@ async def on_voice_state_update(member, before, after):
             cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
             conn.commit()
 
-@bot.command()
-async def 음성시간(ctx):
-    cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (ctx.author.id,))
-    row = cursor.fetchone()
-    
-    total_seconds = row[0] if row else 0
-    
-    # 실시간 접속 중인 경우 현재까지의 시간 합산해서 보여주기
-    if ctx.author.id in voice_tracking:
-        total_seconds += int(time.time() - voice_tracking[ctx.author.id])
-    
-    hours = total_seconds // 3600
-    minutes = (total_seconds % 3600) // 60
-    seconds = total_seconds % 60
-    
-    embed = discord.Embed(
-        title=f"📊 {ctx.author.display_name}님의 음성 통계",
-        description=f"총 이용 시간: **{hours}시간 {minutes}분 {seconds}초**",
-        color=0x5865f2
-    )
-    embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    await ctx.send(embed=embed)
+
 
 # =========================
 # 음성 등급 설정
@@ -1061,14 +1045,14 @@ class AdminTimeView(discord.ui.View):
         await update_member_role(interaction.user, 0)
         await interaction.response.send_message("✅ 누적 음성 이용 시간이 초기화되었습니다.", ephemeral=True)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 음성통계설정(ctx):
+@bot.tree.command(name="음성통계설정", description="🎙️ 음성 채널 이용 통계 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 음성통계설정(interaction: discord.Interaction):
     target_channel_id = 1488708916660404246
     channel = bot.get_channel(target_channel_id)
     
     if not channel:
-        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        await interaction.response.send_message(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -1079,18 +1063,32 @@ async def 음성통계설정(ctx):
     embed.set_footer(text="자신에게만 보이는 메시지로 안내됩니다.")
     
     await channel.send(embed=embed, view=VoiceStatView())
-    
-    # 명령어 및 확인 메시지 삭제
-    await ctx.message.delete()
-    confirm_msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.")
-    await asyncio.sleep(3)
-    try:
-        await confirm_msg.delete()
-    except:
-        pass
+    await interaction.response.send_message(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.", ephemeral=True)
 
-@bot.command()
-async def 음성순위(ctx):
+@bot.tree.command(name="음성시간", description="📊 자신의 총 음성 이용 시간을 확인합니다.")
+async def 음성시간(interaction: discord.Interaction):
+    cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (interaction.user.id,))
+    row = cursor.fetchone()
+    
+    total_seconds = row[0] if row else 0
+    
+    if interaction.user.id in voice_tracking:
+        total_seconds += int(time.time() - voice_tracking[interaction.user.id])
+    
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    
+    embed = discord.Embed(
+        title=f"📊 {interaction.user.display_name}님의 음성 통계",
+        description=f"총 이용 시간: **{hours}시간 {minutes}분 {seconds}초**",
+        color=0x5865f2
+    )
+    embed.set_thumbnail(url=interaction.user.display_avatar.url)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="음성순위", description="🏆 서버 내 음성 이용 시간 상위 10명을 확인합니다.")
+async def 음성순위(interaction: discord.Interaction):
     # DB에서 모든 데이터 가져오기
     cursor.execute("SELECT user_id, total_seconds FROM voice_time")
     db_data = {row[0]: row[1] for row in cursor.fetchall()}
@@ -1105,7 +1103,7 @@ async def 음성순위(ctx):
     sorted_data = sorted(db_data.items(), key=lambda x: x[1], reverse=True)[:10]
     
     if not sorted_data:
-        await ctx.send("❌ 기록된 데이터가 없습니다.")
+        await interaction.response.send_message("❌ 기록된 데이터가 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -1125,17 +1123,17 @@ async def 음성순위(ctx):
     embed.add_field(name="순위표", value=ranking_text, inline=False)
     embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
     
-    await ctx.send(embed=embed)
+    await interaction.response.send_message(embed=embed)
 
-@bot.command()
-async def 시간설정(ctx, member: discord.Member, minutes: int):
+@bot.tree.command(name="시간설정", description="⚙️ 특정 유저의 누적 음성 시간을 설정합니다.")
+@app_commands.describe(member="시간을 설정할 유저", minutes="설정할 시간(분)")
+async def 시간설정(interaction: discord.Interaction, member: discord.Member, minutes: int):
     # 권한 체크: 관리자 또는 특정 역할(1488734131717148793) 보유자
     allowed_role_id = 1488734131717148793
-    has_role = any(role.id == allowed_role_id for role in ctx.author.roles)
+    has_role = any(role.id == allowed_role_id for role in interaction.user.roles)
     
-    if not (ctx.author.guild_permissions.administrator or has_role):
-        await ctx.send("❌ 이 명령어를 사용할 권한이 없습니다.", delete_after=3)
-        await ctx.message.delete()
+    if not (interaction.user.guild_permissions.administrator or has_role):
+        await interaction.response.send_message("❌ 이 명령어를 사용할 권한이 없습니다.", ephemeral=True)
         return
 
     new_seconds = minutes * 60
@@ -1146,7 +1144,7 @@ async def 시간설정(ctx, member: discord.Member, minutes: int):
     # 설정된 시간에 맞춰 등급 역할 업데이트
     await update_member_role(member, new_seconds)
     
-    await ctx.send(f"✅ {member.mention}님의 누적 음성 시간을 **{minutes}분**으로 설정했습니다.")
+    await interaction.response.send_message(f"✅ {member.mention}님의 누적 음성 시간을 **{minutes}분**으로 설정했습니다.")
 
 # =========================
 # 불편 신고 시스템
@@ -1190,14 +1188,14 @@ class ReportView(discord.ui.View):
     async def report(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ReportModal())
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 불편신고설정(ctx):
+@bot.tree.command(name="불편신고설정", description="📢 불편 신고 및 건의 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 불편신고설정(interaction: discord.Interaction):
     target_channel_id = 1488781964084514926
     channel = bot.get_channel(target_channel_id)
     
     if not channel:
-        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        await interaction.response.send_message(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -1212,14 +1210,7 @@ async def 불편신고설정(ctx):
     embed.set_footer(text="신고 내용은 관리자에게만 공개됩니다.")
     
     await channel.send(embed=embed, view=ReportView())
-    await ctx.message.delete()
-    
-    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 불편 신고 버튼을 생성했습니다.")
-    await asyncio.sleep(3)
-    try:
-        await msg.delete()
-    except:
-        pass
+    await interaction.response.send_message(f"✅ <#{target_channel_id}> 채널에 불편 신고 버튼을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 제재 내역 시스템 (자동 만료 포함)
@@ -1418,14 +1409,14 @@ class SanctionView(discord.ui.View):
             
         await interaction.response.send_modal(ResetSanctionModal())
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 제재내역설정(ctx):
+@bot.tree.command(name="제재내역설정", description="⚖️ 서버 제재 관리 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 제재내역설정(interaction: discord.Interaction):
     target_channel_id = 1489232745203765428
     channel = bot.get_channel(target_channel_id)
     
     if not channel:
-        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        await interaction.response.send_message(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -1442,12 +1433,7 @@ async def 제재내역설정(ctx):
     )
     
     await channel.send(embed=embed, view=SanctionView())
-    await ctx.message.delete()
-    
-    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 제재 관리 버튼을 생성했습니다.")
-    await asyncio.sleep(3)
-    try: await msg.delete()
-    except: pass
+    await interaction.response.send_message(f"✅ <#{target_channel_id}> 채널에 제재 관리 버튼을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 출석체크 시스템
@@ -1471,7 +1457,7 @@ class AttendanceView(discord.ui.View):
             log_embed.set_thumbnail(url=interaction.user.display_avatar.url)
             await log_channel.send(embed=log_embed)
 
-        # 2. 공개 채널 알림 (모두가 볼 수 있게)
+        # 2. 공개 채널 알림 (모두가 볼 수 있게, 알람은 울리지 않도록 설정)
         public_embed = discord.Embed(
             title="🎊 초대박 행운아 탄생! 🎊",
             description=(
@@ -1481,8 +1467,14 @@ class AttendanceView(discord.ui.View):
             ),
             color=0xffd700
         )
-        public_embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png") # 이전에 생성한 배너 재사용
-        await interaction.channel.send(content=f"@everyone {interaction.user.mention} 님의 행운을 축하해주세요!", embed=public_embed)
+        public_embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
+        
+        # allowed_mentions를 사용하여 @everyone 텍스트는 보이지만 알람은 울리지 않게 설정
+        await interaction.channel.send(
+            content=f"@everyone {interaction.user.mention} 님의 행운을 축하해주세요!", 
+            embed=public_embed,
+            allowed_mentions=discord.AllowedMentions.none()
+        )
 
     @discord.ui.button(label="출석체크 하기", style=discord.ButtonStyle.success, emoji="✅", custom_id="attendance_check_btn")
     async def attendance(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1491,7 +1483,23 @@ class AttendanceView(discord.ui.View):
         row = cursor.fetchone()
 
         if row and row[0] == today:
-            await interaction.response.send_message("❌ 오늘은 이미 출석체크를 완료하셨습니다. 내일 다시 시도해주세요!", ephemeral=True)
+            # 다음 자정까지 남은 시간 계산
+            now = datetime.datetime.now()
+            next_day = now + datetime.timedelta(days=1)
+            midnight = datetime.datetime(next_day.year, next_day.month, next_day.day, 0, 0, 0)
+            remaining = midnight - now
+            
+            hours, remainder = divmod(int(remaining.total_seconds()), 3600)
+            minutes, seconds = divmod(remainder, 60)
+            
+            await interaction.response.send_message(
+                f"❌ 오늘은 이미 출석체크를 완료하셨습니다.\n"
+                f"📅 다음 출석체크까지 **{hours}시간 {minutes}분** 남았습니다.", 
+                ephemeral=True
+            )
+            await asyncio.sleep(5)
+            try: await interaction.delete_original_response()
+            except: pass
             return
 
         # DB 업데이트
@@ -1499,7 +1507,7 @@ class AttendanceView(discord.ui.View):
         cursor.execute("UPDATE attendance SET last_date = ? WHERE user_id = ?", (today, interaction.user.id))
         conn.commit()
 
-        # 0.1% 확률 계산 (0~999 중 0이 나오면 당첨)
+        # 0.1% 확률 계산
         is_lucky = random.randint(0, 999) == 0
         
         if is_lucky:
@@ -1507,6 +1515,13 @@ class AttendanceView(discord.ui.View):
             await interaction.response.send_message("✨ 대박! 0.1% 확률에 당첨되셨습니다! 모두에게 알림이 전송되었습니다.", ephemeral=True)
         else:
             await interaction.response.send_message(f"📅 출석체크 완료! 오늘도 즐거운 시간 보내세요.", ephemeral=True)
+            
+        # 5초 후 확인 메시지 삭제
+        await asyncio.sleep(5)
+        try:
+            await interaction.delete_original_response()
+        except:
+            pass
 
     @discord.ui.button(label="[테스트] 0.1% 확정 당첨", style=discord.ButtonStyle.secondary, emoji="🧪", custom_id="test_attendance_lucky_btn")
     async def test_lucky(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1514,9 +1529,9 @@ class AttendanceView(discord.ui.View):
         await self.trigger_lucky_event(interaction)
         await interaction.response.send_message("🧪 [테스트] 확정 당첨 이벤트가 실행되었습니다.", ephemeral=True)
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 출석체크설정(ctx):
+@bot.tree.command(name="출석체크설정", description="📅 매일매일 출석체크 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 출석체크설정(interaction: discord.Interaction):
     embed = discord.Embed(
         title="📅 매일매일 출석체크",
         description=(
@@ -1528,8 +1543,8 @@ async def 출석체크설정(ctx):
     )
     embed.set_footer(text="매일 자정에 초기화됩니다.")
     
-    await ctx.send(embed=embed, view=AttendanceView())
-    await ctx.message.delete()
+    await interaction.channel.send(embed=embed, view=AttendanceView())
+    await interaction.response.send_message("✅ 출석체크 패널을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 외출 신청 시스템
@@ -1579,14 +1594,14 @@ class OutingView(discord.ui.View):
     async def outing(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(OutingModal())
 
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def 외출신청설정(ctx):
+@bot.tree.command(name="외출신청설정", description="🏠 외출 신청 버튼 패널을 생성합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def 외출신청설정(interaction: discord.Interaction):
     target_channel_id = 1490125067323965440
     channel = bot.get_channel(target_channel_id)
     
     if not channel:
-        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        await interaction.response.send_message(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.", ephemeral=True)
         return
 
     embed = discord.Embed(
@@ -1602,14 +1617,7 @@ async def 외출신청설정(ctx):
     )
     
     await channel.send(embed=embed, view=OutingView())
-    await ctx.message.delete()
-    
-    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 외출 신청 버튼을 생성했습니다.")
-    await asyncio.sleep(3)
-    try:
-        await msg.delete()
-    except:
-        pass
+    await interaction.response.send_message(f"✅ <#{target_channel_id}> 채널에 외출 신청 버튼을 생성했습니다.", ephemeral=True)
 
 # =========================
 # 이모지 역할 부여 시스템
