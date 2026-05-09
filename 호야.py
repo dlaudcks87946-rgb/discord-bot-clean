@@ -7,6 +7,7 @@ from flask import Flask
 from threading import Thread
 import random
 import asyncio
+import time
 
 app = Flask('')
 
@@ -72,6 +73,13 @@ CREATE TABLE IF NOT EXISTS participants (
     room_id TEXT,
     user_id INTEGER,
     category TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS voice_time (
+    user_id INTEGER PRIMARY KEY,
+    total_seconds INTEGER DEFAULT 0
 )
 """)
 
@@ -682,6 +690,7 @@ async def 닉네임설정(ctx):
 async def on_ready():
     bot.add_view(RoleAssignmentView()) # 역할 부여 뷰 등록
     bot.add_view(NicknameView()) # 닉네임 변경 뷰 등록
+    bot.add_view(VoiceStatView()) # 음성 통계 뷰 등록
     cursor.execute("SELECT message_id FROM panels")
     for (msg_id,) in cursor.fetchall():
         bot.add_view(PanelView())
@@ -693,10 +702,30 @@ async def on_ready():
     print("완전 최종 실행 완료")
 
 # =========================
-# 음성채널 자동 삭제
+# 음성채널 이용 시간 측정
 # =========================
+voice_tracking = {}
+
 @bot.event
 async def on_voice_state_update(member, before, after):
+    # 1. 이용 시간 측정 로직
+    if before.channel != after.channel:
+        # 퇴장하거나 채널을 이동한 경우 (이전 채널에서의 시간 정산)
+        if before.channel is not None:
+            if member.id in voice_tracking:
+                join_time = voice_tracking.pop(member.id)
+                duration = int(time.time() - join_time)
+                
+                cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (member.id,))
+                cursor.execute("UPDATE voice_time SET total_seconds = total_seconds + ? WHERE user_id = ?", (duration, member.id))
+                conn.commit()
+
+        # 새로운 채널에 입장한 경우 (시작 시간 기록)
+        if after.channel is not None:
+            # 봇이 재시작되어도 이미 채널에 있던 유저는 정산이 안될 수 있으므로 입장 시각 기록
+            voice_tracking[member.id] = time.time()
+
+    # 2. 기존 로직: 음성채널 자동 삭제
     if before.channel and len(before.channel.members) == 0:
         cursor.execute("SELECT room_id, channel_id, message_id FROM rooms WHERE voice_channel_id=?", (before.channel.id,))
         row = cursor.fetchone()
@@ -722,6 +751,78 @@ async def on_voice_state_update(member, before, after):
             cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
             cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
             conn.commit()
+
+@bot.command()
+async def 음성시간(ctx):
+    cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (ctx.author.id,))
+    row = cursor.fetchone()
+    
+    total_seconds = row[0] if row else 0
+    
+    # 실시간 접속 중인 경우 현재까지의 시간 합산해서 보여주기
+    if ctx.author.id in voice_tracking:
+        total_seconds += int(time.time() - voice_tracking[ctx.author.id])
+    
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    seconds = total_seconds % 60
+    
+    embed = discord.Embed(
+        title=f"📊 {ctx.author.display_name}님의 음성 통계",
+        description=f"총 이용 시간: **{hours}시간 {minutes}분 {seconds}초**",
+        color=0x5865f2
+    )
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    await ctx.send(embed=embed)
+
+# =========================
+# 음성 통계 버튼 UI
+# =========================
+class VoiceStatView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="내 음성 시간 확인", style=discord.ButtonStyle.primary, custom_id="check_voice_time_btn")
+    async def check_voice_time(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cursor.execute("SELECT total_seconds FROM voice_time WHERE user_id = ?", (interaction.user.id,))
+        row = cursor.fetchone()
+        
+        total_seconds = row[0] if row else 0
+        
+        if interaction.user.id in voice_tracking:
+            total_seconds += int(time.time() - voice_tracking[interaction.user.id])
+        
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        
+        embed = discord.Embed(
+            title=f"📊 {interaction.user.display_name}님의 음성 통계",
+            description=f"총 이용 시간: **{hours}시간 {minutes}분 {seconds}초**",
+            color=0x5865f2
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 음성통계설정(ctx):
+    target_channel_id = 1488708916660404246
+    channel = bot.get_channel(target_channel_id)
+    
+    if not channel:
+        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title="🎙️ 음성 채널 이용 통계",
+        description="아래 버튼을 누르면 이 서버에서의 **총 음성 채널 이용 시간**을 확인할 수 있습니다.",
+        color=0x2b2d31
+    )
+    embed.set_footer(text="자신에게만 보이는 메시지로 안내됩니다.")
+    
+    await channel.send(embed=embed, view=VoiceStatView())
+    await ctx.send(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.")
 
 # =========================
 # 이모지 역할 부여 시스템
