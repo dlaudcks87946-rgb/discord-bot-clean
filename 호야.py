@@ -824,6 +824,44 @@ async def 음성통계설정(ctx):
     await channel.send(embed=embed, view=VoiceStatView())
     await ctx.send(f"✅ <#{target_channel_id}> 채널에 음성 통계 버튼을 생성했습니다.")
 
+@bot.command()
+async def 음성순위(ctx):
+    # DB에서 모든 데이터 가져오기
+    cursor.execute("SELECT user_id, total_seconds FROM voice_time")
+    db_data = {row[0]: row[1] for row in cursor.fetchall()}
+    
+    # 실시간 접속 중인 유저들의 시간 합산
+    current_time = time.time()
+    for u_id, join_time in voice_tracking.items():
+        elapsed = int(current_time - join_time)
+        db_data[u_id] = db_data.get(u_id, 0) + elapsed
+        
+    # 시간 순으로 정렬 (내림차순)
+    sorted_data = sorted(db_data.items(), key=lambda x: x[1], reverse=True)[:10]
+    
+    if not sorted_data:
+        await ctx.send("❌ 기록된 데이터가 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title="🏆 음성 채널 이용 시간 순위 (TOP 10)",
+        description="이 서버에서 가장 오래 대화한 유저분들입니다!",
+        color=0xffd700 # 금색
+    )
+    
+    ranking_text = ""
+    for i, (u_id, total_seconds) in enumerate(sorted_data, 1):
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        
+        medal = "🥇" if i == 1 else "🥈" if i == 2 else "🥉" if i == 3 else "👤"
+        ranking_text += f"{medal} **{i}위**: <@{u_id}> - {hours}시간 {minutes}분\n"
+        
+    embed.add_field(name="순위표", value=ranking_text, inline=False)
+    embed.set_footer(text="실시간 접속 시간이 포함된 순위입니다.")
+    
+    await ctx.send(embed=embed)
+
 # =========================
 # 이모지 역할 부여 시스템
 # =========================
