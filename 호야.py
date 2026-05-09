@@ -723,6 +723,7 @@ async def on_ready():
     bot.add_view(NicknameView()) # 닉네임 변경 뷰 등록
     bot.add_view(VoiceStatView()) # 음성 통계 뷰 등록
     bot.add_view(ReportView()) # 불편 신고 뷰 등록
+    bot.add_view(OutingView()) # 외출 신청 뷰 등록
     cursor.execute("SELECT message_id FROM panels")
     for (msg_id,) in cursor.fetchall():
         bot.add_view(PanelView())
@@ -1187,6 +1188,86 @@ async def 불편신고설정(ctx):
     await ctx.message.delete()
     
     msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 불편 신고 버튼을 생성했습니다.")
+    await asyncio.sleep(3)
+    try:
+        await msg.delete()
+    except:
+        pass
+
+# =========================
+# 외출 신청 시스템
+# =========================
+class OutingModal(discord.ui.Modal, title="외출 신청서 작성"):
+    period = discord.ui.TextInput(
+        label="외출 기간",
+        placeholder="예: 5월 10일 ~ 5월 12일 (3일간)",
+        required=True,
+        max_length=100
+    )
+    reason = discord.ui.TextInput(
+        label="외출 사유",
+        style=discord.TextStyle.paragraph,
+        placeholder="외출 사유를 상세히 입력해 주세요.",
+        required=True,
+        max_length=500
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        target_channel_id = 1490125825574572175
+        channel = bot.get_channel(target_channel_id)
+        
+        if not channel:
+            await interaction.response.send_message("❌ 외출 신청 채널을 찾을 수 없습니다.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🚪 외출 신청서 접수",
+            description=f"**{interaction.user.mention}** 님이 외출을 신청하셨습니다.",
+            color=0x3498db, # 푸른색 계열
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_thumbnail(url=interaction.user.display_avatar.url)
+        embed.add_field(name="📅 외출 기간", value=f"```\n{self.period.value}\n```", inline=False)
+        embed.add_field(name="📝 외출 사유", value=f"```\n{self.reason.value}\n```", inline=False)
+        embed.set_footer(text=f"신청자 ID: {interaction.user.id}")
+
+        await channel.send(embed=embed)
+        await interaction.response.send_message("✅ 외출 신청이 정상적으로 완료되었습니다.", ephemeral=True)
+
+class OutingView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="외출 신청하기", style=discord.ButtonStyle.primary, emoji="🚶", custom_id="outing_request_btn")
+    async def outing(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(OutingModal())
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def 외출신청설정(ctx):
+    target_channel_id = 1490125067323965440
+    channel = bot.get_channel(target_channel_id)
+    
+    if not channel:
+        await ctx.send(f"❌ 채널(ID: {target_channel_id})을 찾을 수 없습니다.")
+        return
+
+    embed = discord.Embed(
+        title="🏠 외출 신청 안내",
+        description=(
+            "외출이 필요하신 분은 아래 버튼을 눌러 신청서를 작성해 주세요.\n\n"
+            "**작성 항목:**\n"
+            "1. 외출 기간 (정확한 날짜 및 시간)\n"
+            "2. 외출 사유\n\n"
+            "제출된 신청서는 관리자가 확인 후 승인해 드립니다."
+        ),
+        color=0x2b2d31
+    )
+    
+    await channel.send(embed=embed, view=OutingView())
+    await ctx.message.delete()
+    
+    msg = await ctx.send(f"✅ <#{target_channel_id}> 채널에 외출 신청 버튼을 생성했습니다.")
     await asyncio.sleep(3)
     try:
         await msg.delete()
