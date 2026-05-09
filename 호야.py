@@ -1303,7 +1303,7 @@ class SanctionModal(discord.ui.Modal, title="제재 내역 등록"):
         await update_sanction_role(interaction.guild, member, new_count)
 
         # 결과 로그 전송
-        log_channel_id = 1489232745203765428
+        log_channel_id = 1489203523102183514
         log_channel = interaction.guild.get_channel(log_channel_id)
         
         embed = discord.Embed(
@@ -1325,6 +1325,49 @@ class SanctionModal(discord.ui.Modal, title="제재 내역 등록"):
             
         await interaction.response.send_message(f"✅ {member.display_name}님의 제재가 등록되었습니다. 로그는 <#{log_channel_id}> 채널로 전송되었습니다.", ephemeral=True)
 
+class ResetSanctionModal(discord.ui.Modal, title="제재 내역 초기화"):
+    user_id = discord.ui.TextInput(label="대상 유저 ID", placeholder="초기화할 유저의 ID를 입력하세요.", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            target_id = int(self.user_id.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 유저 ID는 숫자로만 입력해 주세요.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(target_id)
+        if not member:
+            try: member = await interaction.guild.fetch_member(target_id)
+            except:
+                await interaction.response.send_message("❌ 서버에서 유저를 찾을 수 없습니다.", ephemeral=True)
+                return
+
+        # DB 초기화
+        cursor.execute("UPDATE sanctions SET count = 0, expire_at = 0 WHERE user_id = ?", (target_id,))
+        conn.commit()
+
+        # 역할 제거
+        await update_sanction_role(interaction.guild, member, 0)
+
+        # 로그 전송
+        log_channel_id = 1489203523102183514
+        log_channel = interaction.guild.get_channel(log_channel_id)
+        
+        embed = discord.Embed(
+            title="✨ 제재 내역 초기화 완료",
+            description=f"**{member.mention}** 님의 모든 제재 내역이 초기화되었습니다.",
+            color=0x2ecc71, # 녹색
+            timestamp=discord.utils.utcnow()
+        )
+        embed.add_field(name="👤 대상자", value=f"{member.mention} ({target_id})", inline=True)
+        embed.add_field(name="🛠️ 처리자", value=interaction.user.mention, inline=True)
+        embed.set_footer(text="제재 내역이 정식으로 초기화되었습니다.")
+
+        if log_channel:
+            await log_channel.send(embed=embed)
+            
+        await interaction.response.send_message(f"✅ {member.display_name}님의 모든 제재 내역을 초기화했습니다.", ephemeral=True)
+
 class SanctionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1341,10 +1384,22 @@ class SanctionView(discord.ui.View):
             
         await interaction.response.send_modal(SanctionModal())
 
+    @discord.ui.button(label="제재 내역 초기화", style=discord.ButtonStyle.secondary, emoji="✨", custom_id="admin_sanction_reset_btn")
+    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # 권한 체크
+        allowed_role_id = 1488734131717148793
+        is_admin = interaction.user.guild_permissions.administrator or any(role.id == allowed_role_id for role in interaction.user.roles)
+        
+        if not is_admin:
+            await interaction.response.send_message("❌ 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+            
+        await interaction.response.send_modal(ResetSanctionModal())
+
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def 제재내역설정(ctx):
-    target_channel_id = 1489203523102183514
+    target_channel_id = 1489232745203765428
     channel = bot.get_channel(target_channel_id)
     
     if not channel:
