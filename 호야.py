@@ -820,6 +820,35 @@ async def on_voice_state_update(member, before, after):
                 total = cursor.fetchone()[0]
                 await update_member_role(member, total)
 
+                # 4. 모집 음성 채널 퇴장 시 자동 참가 삭제
+                cursor.execute("SELECT room_id, owner_id, channel_id, message_id FROM rooms WHERE voice_channel_id=?", (before.channel.id,))
+                leave_room_row = cursor.fetchone()
+                if leave_room_row:
+                    room_id, owner_id, ch_id, msg_id = leave_room_row
+                    
+                    # 참가자 명단에서 삭제
+                    remove_user(room_id, member.id)
+                    
+                    # 방장이 나간 경우 방장 위임
+                    if member.id == owner_id:
+                        participants = get_users(room_id, "참가")
+                        waits = get_users(room_id, "대기")
+                        new_owner_id = (participants + waits + [None])[0]
+                        
+                        if new_owner_id:
+                            cursor.execute("UPDATE rooms SET owner_id=? WHERE room_id=?", (new_owner_id, room_id))
+                            conn.commit()
+                    
+                    # 모집글 업데이트 (채널에 인원이 남아있을 때만)
+                    if len(before.channel.members) > 0:
+                        try:
+                            channel = member.guild.get_channel(ch_id)
+                            if channel:
+                                msg = await channel.fetch_message(msg_id)
+                                await msg.edit(embed=make_embed(room_id, member.guild), view=RoomView(room_id))
+                        except:
+                            pass
+
         # 새로운 채널에 입장한 경우 (시작 시간 기록)
         if after.channel is not None:
             # 봇이 재시작되어도 이미 채널에 있던 유저는 정산이 안될 수 있으므로 입장 시각 기록
