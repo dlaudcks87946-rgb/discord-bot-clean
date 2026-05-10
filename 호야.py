@@ -32,6 +32,7 @@ bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 # 설정
 STAFF_ROLE_ID = 1488734131717148793 # 관리자/스태프 역할 ID
+BOOST_CHANNEL_ID = 1488838217464680600 # 부스트 알림 채널 ID
 
 # =========================
 # DB
@@ -800,6 +801,53 @@ async def on_ready():
         print(f"✅ 슬래시 명령어 {len(synced)}개 동기화 완료")
     except Exception as e:
         print(f"❌ 슬래시 명령어 동기화 오류: {e}")
+
+# =========================
+# 서버 부스트 알림 시스템
+# =========================
+async def send_boost_notification(member):
+    channel = member.guild.get_channel(BOOST_CHANNEL_ID)
+    if not channel:
+        return
+
+    # 고급스러운 부스트 알림 임베드
+    embed = discord.Embed(
+        title="🎊 SERVER BOOSTED! 🎊",
+        description=(
+            f"**{member.mention}** 님이 서버를 **부스트** 해주셨습니다!\n"
+            f"서버의 성장을 도와주셔서 진심으로 감사드립니다. 💖\n\n"
+            f"부스터 덕분에 서버가 더욱 풍성해지고 있습니다! ✨"
+        ),
+        color=0xff73fa # 부스트 공식 핑크 색상
+    )
+    
+    embed.add_field(name="🚀 부스터", value=f"{member.display_name}", inline=True)
+    embed.add_field(name="💎 현재 레벨", value=f"Level {member.guild.premium_tier}", inline=True)
+    embed.add_field(name="✨ 총 부스트", value=f"{member.guild.premium_subscription_count}개", inline=True)
+    
+    embed.set_thumbnail(url=member.display_avatar.url)
+    
+    # 사용자가 제공한 이미지의 느낌을 살린 고급 배너 이미지 (사용자가 제공한 사진의 URL을 여기에 넣으시면 됩니다)
+    # 현재는 예시로 고화질 부스트 배너를 사용합니다.
+    embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
+    
+    embed.set_footer(text="Discord Server Boost System", icon_url=member.guild.icon.url if member.guild.icon else None)
+    embed.timestamp = discord.utils.utcnow()
+
+    await channel.send(embed=embed)
+
+@bot.event
+async def on_member_update(before, after):
+    # 부스트 시작 감지 (premium_since가 None이었다가 값이 생기면 부스트 시작)
+    if before.premium_since is None and after.premium_since is not None:
+        await send_boost_notification(after)
+
+@bot.tree.command(name="부스트테스트", description="🚀 서버 부스트 알림을 테스트합니다.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.checks.has_any_role(STAFF_ROLE_ID)
+async def 부스트테스트(interaction: discord.Interaction):
+    await send_boost_notification(interaction.user)
+    await interaction.response.send_message("✅ 부스트 알림 테스트를 전송했습니다.", ephemeral=True)
 
 # =========================
 # 음성채널 이용 시간 측정
