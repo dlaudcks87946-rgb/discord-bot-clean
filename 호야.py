@@ -114,6 +114,8 @@ GAME_DATA = {
     "오버워치": {"emoji": "🔫", "color": 0xfa9c1e, "image": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRamwdKLcNDA5HmgJK6gNkrWN93hQLuSpMTkg&s"},
     "발로": {"emoji": "🎯", "color": 0xff4654, "image": "https://img.icons8.com/color/512/valorant.png"},
     "배그": {"emoji": "🍗", "color": 0xffd700, "image": "https://i.namu.wiki/i/-39mmyx2w53w1_YD7TH5AM55BukpjzibRZxSHbQOCTwdtNj8mxq2ZkxQrInLHr5WvR3wR9CuUEMSAon11jQ3aA.webp"},
+    "스배": {"emoji": "🍗", "color": 0xffd700, "image": "https://i.namu.wiki/i/-39mmyx2w53w1_YD7TH5AM55BukpjzibRZxSHbQOCTwdtNj8mxq2ZkxQrInLHr5WvR3wR9CuUEMSAon11jQ3aA.webp"},
+    "카배": {"emoji": "🍗", "color": 0xffd700, "image": "https://i.namu.wiki/i/-39mmyx2w53w1_YD7TH5AM55BukpjzibRZxSHbQOCTwdtNj8mxq2ZkxQrInLHr5WvR3wR9CuUEMSAon11jQ3aA.webp"},
     "마크": {"emoji": "🧱", "color": 0x2e8b57, "image": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcRf5AbwiADFKcpD6O460H6-c6NVBKoax295xA&s"},
     "로아": {"emoji": "💎", "color": 0x00bfff, "image": "https://mblogthumb-phinf.pstatic.net/MjAxODExMTNfMTEy/MDAxNTQyMTEyMTczMjk3.YPwTVv5idsyihoiw7iweVjFZNziwV8qK8ADBIfxKk7Qg.4MQcdnHJT04oPLjr7KMOB7CUwjyBc5xNBi0rJSi55iIg.PNG.1ets_9o/bi-lostark.png?type=w800"},  # 로아 대체 (판타지 아이콘)
     "메이플": {"emoji": "🍁", "color": 0xff8c00, "image": "https://image.ytn.co.kr/general/jpg/2021/0311/202103110915014429_d.jpg"}, # 메이플 대체 (단풍잎 아이콘)
@@ -135,7 +137,10 @@ MENTION_MAPPING = {
     "롤": ["롤", "리그오브레전드"],
     "서든": ["서든어택"],
     "서든어택": ["서든어택"],
-    "스팀": ["스팀"]
+    "스팀": ["스팀"],
+    "배그": ["배그"],
+    "스배": ["배그"],
+    "카배": ["배그"]
 }
 
 def get_count(room_id, category):
@@ -1526,15 +1531,15 @@ class AttendanceView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    async def trigger_lucky_event(self, interaction: discord.Interaction, is_test: bool = False):
+    async def trigger_lucky_event(self, interaction: discord.Interaction, chance_text: str, is_test: bool = False):
         log_channel_id = 1489253932000743485
         log_channel = interaction.guild.get_channel(log_channel_id)
         
         # 1. 관리자 채널 알림
         if log_channel:
             log_embed = discord.Embed(
-                title="💎 0.1% 확률 당첨 발생!",
-                description=f"**{interaction.user.mention}** 님이 출석체크 중 초희귀 확률에 당첨되었습니다!",
+                title=f"💎 {chance_text} 확률 당첨 발생!",
+                description=f"**{interaction.user.mention}** 님이 출석체크 중 희귀 확률에 당첨되었습니다!",
                 color=0x00ffff,
                 timestamp=discord.utils.utcnow()
             )
@@ -1547,7 +1552,7 @@ class AttendanceView(discord.ui.View):
                 title="🎊 초대박 행운아 탄생! 🎊",
                 description=(
                     f"축하합니다! **{interaction.user.mention}** 님이\n"
-                    f"**0.1%**의 확률을 뚫고 특별한 행운에 당첨되셨습니다!\n\n"
+                    f"**{chance_text}**의 확률을 뚫고 특별한 행운에 당첨되셨습니다!\n\n"
                     f"오늘 하루는 정말 운이 좋은 날이 되겠네요! ✨"
                 ),
                 color=0xffd700
@@ -1591,12 +1596,20 @@ class AttendanceView(discord.ui.View):
         cursor.execute("UPDATE attendance SET last_date = ? WHERE user_id = ?", (today, interaction.user.id))
         conn.commit()
 
-        # 0.1% 확률 계산
-        is_lucky = random.randint(0, 999) == 0
+        # 확률 계산 (기본 1%, 특정 역할 5%)
+        lucky_chance = 0.01
+        chance_text = "1%"
+        
+        # 역할 ID 1490039050638196868 체크
+        if any(role.id == 1490039050638196868 for role in interaction.user.roles):
+            lucky_chance = 0.05
+            chance_text = "5%"
+            
+        is_lucky = random.random() < lucky_chance
         
         if is_lucky:
-            await self.trigger_lucky_event(interaction)
-            await interaction.response.send_message("✨ 대박! 0.1% 확률에 당첨되셨습니다! 모두에게 알림이 전송되었습니다.", ephemeral=True)
+            await self.trigger_lucky_event(interaction, chance_text)
+            await interaction.response.send_message(f"✨ 대박! {chance_text} 확률에 당첨되셨습니다! 모두에게 알림이 전송되었습니다.", ephemeral=True)
         else:
             await interaction.response.send_message(f"📅 출석체크 완료! 오늘도 즐거운 시간 보내세요.", ephemeral=True)
             
@@ -1616,7 +1629,8 @@ async def 출석체크설정(interaction: discord.Interaction):
         title="📅 매일매일 출석체크",
         description=(
             "아래 버튼을 눌러 출석체크를 해주세요!\n"
-            "하루에 한 번만 가능하며, **0.1%**의 확률로 특별한 행운이 찾아옵니다.\n\n"
+            "하루에 한 번만 가능하며, **1%**의 확률로 특별한 행운이 찾아옵니다.\n"
+            "(특정 역할 보유 시 당첨 확률이 상승합니다!)\n\n"
             "과연 오늘 최고의 행운아는 누가 될까요?"
         ),
         color=0x2ecc71
