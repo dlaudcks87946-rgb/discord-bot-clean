@@ -827,14 +827,19 @@ async def send_boost_notification(member):
     
     embed.set_thumbnail(url=member.display_avatar.url)
     
-    # 사용자가 제공한 이미지의 느낌을 살린 고급 배너 이미지 (사용자가 제공한 사진의 URL을 여기에 넣으시면 됩니다)
-    # 현재는 예시로 고화질 부스트 배너를 사용합니다.
-    embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
-    
     embed.set_footer(text="Discord Server Boost System", icon_url=member.guild.icon.url if member.guild.icon else None)
     embed.timestamp = discord.utils.utcnow()
 
-    await channel.send(embed=embed)
+    # 로컬 이미지 파일 (boost.png) 처리
+    image_path = "boost.png"
+    if os.path.exists(image_path):
+        file = discord.File(image_path, filename="boost.png")
+        embed.set_image(url="attachment://boost.png")
+        await channel.send(embed=embed, file=file)
+    else:
+        # 파일이 없을 경우 기본 이미지 사용
+        embed.set_image(url="https://i.ibb.co/vXvR8xR/congratulations-banner.png")
+        await channel.send(embed=embed)
 
 @bot.event
 async def on_member_update(before, after):
