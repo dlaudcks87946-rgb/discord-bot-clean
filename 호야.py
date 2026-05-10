@@ -825,6 +825,31 @@ async def on_voice_state_update(member, before, after):
             # 봇이 재시작되어도 이미 채널에 있던 유저는 정산이 안될 수 있으므로 입장 시각 기록
             voice_tracking[member.id] = time.time()
 
+            # 3. 모집 음성 채널 입장 시 자동 참가 등록
+            cursor.execute("SELECT room_id, max_people, channel_id, message_id FROM rooms WHERE voice_channel_id=?", (after.channel.id,))
+            room_row = cursor.fetchone()
+            if room_row:
+                room_id, max_people, ch_id, msg_id = room_row
+                
+                # 이미 참여 중인지 확인 (봇 제외)
+                cursor.execute("SELECT category FROM participants WHERE room_id=? AND user_id=?", (room_id, member.id))
+                if not cursor.fetchone() and not member.bot:
+                    # 참여 중이 아니라면 자동 등록
+                    cursor.execute("SELECT COUNT(*) FROM participants WHERE room_id=? AND category='참가'", (room_id,))
+                    count = cursor.fetchone()[0]
+                    
+                    category = "참가" if count < max_people else "대기"
+                    add_user(room_id, member.id, category)
+                    
+                    # 모집글 업데이트
+                    try:
+                        channel = member.guild.get_channel(ch_id)
+                        if channel:
+                            msg = await channel.fetch_message(msg_id)
+                            await msg.edit(embed=make_embed(room_id, member.guild), view=RoomView(room_id))
+                    except:
+                        pass
+
     # 2. 기존 로직: 음성채널 자동 삭제
     if before.channel and len(before.channel.members) == 0:
         cursor.execute("SELECT room_id, channel_id, message_id FROM rooms WHERE voice_channel_id=?", (before.channel.id,))
