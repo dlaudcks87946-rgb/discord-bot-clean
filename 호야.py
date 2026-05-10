@@ -554,10 +554,22 @@ class CreateModal(discord.ui.Modal, title="모집 생성"):
         )
         conn.commit()
 
-        add_user(room_id, interaction.user.id, "참가")
-
-        if interaction.user.voice:
-            await interaction.user.move_to(voice_channel)
+        # 음성 채널에 있는 사람들 자동 참가 처리
+        participants_to_add = [interaction.user]
+        if interaction.user.voice and interaction.user.voice.channel:
+            for member in interaction.user.voice.channel.members:
+                if member.id != interaction.user.id and not member.bot:
+                    participants_to_add.append(member)
+        
+        for i, member in enumerate(participants_to_add):
+            category = "참가" if i < people_count else "대기"
+            add_user(room_id, member.id, category)
+            # 생성된 음성 채널로 이동
+            if member.voice:
+                try:
+                    await member.move_to(voice_channel)
+                except:
+                    pass
 
         # 게임 이름과 일치하는 역할들 찾기 (매핑 활용)
         game_input = self.game.value
