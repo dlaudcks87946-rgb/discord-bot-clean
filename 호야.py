@@ -305,15 +305,7 @@ async def handle_action(interaction, room_id, choice):
                 cursor.execute("UPDATE rooms SET owner_id=? WHERE room_id=?", (new_owner_id, room_id))
                 conn.commit()
             else:
-                # 남은 사람이 아무도 없으면 방 종료
-                if voice_channel:
-                    try:
-                        await voice_channel.delete()
-                    except discord.NotFound:
-                        pass
-                    except discord.HTTPException:
-                        pass
-
+                # 남은 사람이 아무도 없으면 방 종료 (음성 채널은 삭제하지 않음)
                 cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
                 cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
                 conn.commit()
@@ -325,14 +317,7 @@ async def handle_action(interaction, room_id, choice):
             await interaction.response.send_message("❌ 방장만 가능", ephemeral=True)
             return
 
-        if voice_channel:
-            try:
-                await voice_channel.delete()
-            except discord.NotFound:
-                pass
-            except discord.HTTPException:
-                pass
-
+        # 방 종료 시 음성 채널은 삭제하지 않음
         cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
         cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
         conn.commit()
@@ -788,12 +773,17 @@ async def on_ready():
         for voice_channel in guild.voice_channels:
             for member in voice_channel.members:
                 if not member.bot:
-                    voice_tracking[member.id] = time.time()
+                    # 이미 추적 중인 유저는 덮어쓰지 않음 (재연결 시 시간 손실 방지)
+                    if member.id not in voice_tracking:
+                        voice_tracking[member.id] = time.time()
 
     print("완전 최종 실행 완료")
     
     if not check_sanction_expirations.is_running():
         check_sanction_expirations.start()
+        
+    if not save_voice_times.is_running():
+        save_voice_times.start()
         
     # 슬래시 명령어 동기화
     try:
@@ -858,6 +848,23 @@ async def 부스트테스트(interaction: discord.Interaction):
 # 음성채널 이용 시간 측정
 # =========================
 voice_tracking = {}
+
+@tasks.loop(minutes=1)
+async def save_voice_times():
+    try:
+        now = time.time()
+        # 딕셔너리 복사본으로 반복하여 런타임 에러 방지
+        for user_id in list(voice_tracking.keys()):
+            join_time = voice_tracking.get(user_id)
+            if join_time:
+                duration = int(now - join_time)
+                if duration > 0:
+                    cursor.execute("INSERT OR IGNORE INTO voice_time (user_id, total_seconds) VALUES (?, 0)", (user_id,))
+                    cursor.execute("UPDATE voice_time SET total_seconds = total_seconds + ? WHERE user_id = ?", (duration, user_id))
+                    voice_tracking[user_id] = now # 기준 시간 갱신
+        conn.commit()
+    except Exception as e:
+        print(f"음성 시간 자동 저장 오류: {e}")
 
 @bot.event
 async def on_voice_state_update(member, before, after):
