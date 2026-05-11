@@ -103,6 +103,12 @@ CREATE TABLE IF NOT EXISTS attendance (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS cleanup_channels (
+    voice_channel_id INTEGER PRIMARY KEY
+)
+""")
+
 conn.commit()
 
 # =========================
@@ -305,7 +311,14 @@ async def handle_action(interaction, room_id, choice):
                 cursor.execute("UPDATE rooms SET owner_id=? WHERE room_id=?", (new_owner_id, room_id))
                 conn.commit()
             else:
-                # 남은 사람이 아무도 없으면 방 종료 (음성 채널은 삭제하지 않음)
+                # 남은 사람이 아무도 없으면 방 종료
+                if voice_channel:
+                    if len(voice_channel.members) == 0:
+                        try: await voice_channel.delete()
+                        except: pass
+                    else:
+                        cursor.execute("INSERT OR IGNORE INTO cleanup_channels VALUES (?)", (voice_channel.id,))
+
                 cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
                 cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
                 conn.commit()
@@ -317,7 +330,13 @@ async def handle_action(interaction, room_id, choice):
             await interaction.response.send_message("❌ 방장만 가능", ephemeral=True)
             return
 
-        # 방 종료 시 음성 채널은 삭제하지 않음
+        if voice_channel:
+            if len(voice_channel.members) == 0:
+                try: await voice_channel.delete()
+                except: pass
+            else:
+                cursor.execute("INSERT OR IGNORE INTO cleanup_channels VALUES (?)", (voice_channel.id,))
+
         cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
         cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
         conn.commit()
@@ -946,17 +965,20 @@ async def on_voice_state_update(member, before, after):
 
     # 2. 기존 로직: 음성채널 자동 삭제
     if before.channel and len(before.channel.members) == 0:
+        # 일반 모집 방 확인
         cursor.execute("SELECT room_id, channel_id, message_id FROM rooms WHERE voice_channel_id=?", (before.channel.id,))
-        row = cursor.fetchone()
+        room_row = cursor.fetchone()
 
-        if row:
-            room_id, channel_id, message_id = row
+        # 종료된 방(클린업 대상) 확인
+        cursor.execute("SELECT voice_channel_id FROM cleanup_channels WHERE voice_channel_id=?", (before.channel.id,))
+        cleanup_row = cursor.fetchone()
+
+        if room_row:
+            room_id, channel_id, message_id = room_row
             
             # 음성 채널 삭제
-            try:
-                await before.channel.delete()
-            except:
-                pass
+            try: await before.channel.delete()
+            except: pass
 
             # 모집글 삭제
             try:
@@ -964,11 +986,18 @@ async def on_voice_state_update(member, before, after):
                 if channel:
                     msg = await channel.fetch_message(message_id)
                     await msg.delete()
-            except:
-                pass
+            except: pass
 
             cursor.execute("DELETE FROM rooms WHERE room_id=?", (room_id,))
             cursor.execute("DELETE FROM participants WHERE room_id=?", (room_id,))
+            conn.commit()
+            
+        elif cleanup_row:
+            # 종료된 방의 채널 삭제
+            try: await before.channel.delete()
+            except: pass
+            
+            cursor.execute("DELETE FROM cleanup_channels WHERE voice_channel_id=?", (before.channel.id,))
             conn.commit()
 
 @bot.tree.command(name="음성시간", description="📊 자신의 총 음성 이용 시간을 확인합니다.")
