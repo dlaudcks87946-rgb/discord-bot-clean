@@ -366,13 +366,25 @@ async def handle_action(interaction, room_id, choice):
         # 기존 팀 정보 초기화 및 재배정
         cursor.execute("DELETE FROM participants WHERE room_id=? AND category IN ('참가', '블루팀', '레드팀')", (room_id,))
         for u in blue_team:
-            cursor.execute("INSERT INTO participants VALUES (?, ?, ?)", (room_id, u, "블루팀"))
+            cursor.execute("INSERT INTO participants (room_id, user_id, category) VALUES (?, ?, ?)", (room_id, u, "블루팀"))
         for u in red_team:
-            cursor.execute("INSERT INTO participants VALUES (?, ?, ?)", (room_id, u, "레드팀"))
+            cursor.execute("INSERT INTO participants (room_id, user_id, category) VALUES (?, ?, ?)", (room_id, u, "레드팀"))
         conn.commit()
         
         await interaction.response.edit_message(embed=make_embed(room_id, interaction.guild), view=RoomView(room_id))
         await interaction.followup.send("🎲 팀이 무작위로 배정되었습니다!", ephemeral=True)
+        return
+
+    elif choice == "수정":
+        if interaction.user.id != owner_id:
+            await interaction.response.send_message("❌ 방장만 가능", ephemeral=True)
+            return
+        
+        cursor.execute("SELECT game, max_people, time FROM rooms WHERE room_id=?", (room_id,))
+        row = cursor.fetchone()
+        if row:
+            game, people, time_str = row
+            await interaction.response.send_modal(EditModal(room_id, game, people, time_str))
         return
 
     if not interaction.response.is_done():
@@ -413,6 +425,10 @@ class RoomView(discord.ui.View):
     @discord.ui.button(label="팀 나누기", style=discord.ButtonStyle.secondary)
     async def shuffle(self, interaction, button):
         await handle_action(interaction, self.room_id, "팀나누기")
+
+    @discord.ui.button(label="수정", style=discord.ButtonStyle.secondary)
+    async def edit(self, interaction, button):
+        await handle_action(interaction, self.room_id, "수정")
 
 # =========================
 # 포지션/티어 선택 UI
@@ -527,6 +543,69 @@ class ConfirmButton(discord.ui.Button):
         except:
             pass
         view.stop()
+
+class EditModal(discord.ui.Modal, title="모집 수정"):
+    def __init__(self, room_id, current_game, current_people, current_time):
+        super().__init__()
+        self.room_id = room_id
+        self.game_input = discord.ui.TextInput(label="게임", default=current_game)
+        self.people_input = discord.ui.TextInput(label="인원 (숫자)", default=str(current_people))
+        self.time_input = discord.ui.TextInput(label="시간", default=current_time)
+        self.add_item(self.game_input)
+        self.add_item(self.people_input)
+        self.add_item(self.time_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        game_val = self.game_input.value
+        try:
+            people_count = int(self.people_input.value)
+        except ValueError:
+            await interaction.response.send_message("❌ 인원은 숫자로 입력해주세요.", ephemeral=True)
+            return
+        time_val = self.time_input.value
+
+        # DB 업데이트
+        cursor.execute(
+            "UPDATE rooms SET game=?, max_people=?, time=? WHERE room_id=?",
+            (game_val, people_count, time_val, self.room_id)
+        )
+        conn.commit()
+
+        # 인원 감소 시 초과 인원을 대기로 이동
+        cursor.execute("SELECT user_id FROM participants WHERE room_id=? AND category='참가'", (self.room_id,))
+        participants = cursor.fetchall()
+        if len(participants) > people_count:
+            # 여기서는 단순히 초과분을 대기로 보냄. 
+            # SQLite의 경우 명시적인 순서가 없으므로 무작위로 선택될 수 있음.
+            # 실무에서는 입장 시간 등을 고려하는 것이 좋지만, 현재 스키마에는 입장 시간이 없음.
+            excess_count = len(participants) - people_count
+            for i in range(excess_count):
+                u_id = participants[people_count + i][0]
+                cursor.execute("UPDATE participants SET category='대기' WHERE room_id=? AND user_id=?", (self.room_id, u_id))
+            conn.commit()
+
+        # 음성 채널 이름 업데이트
+        cursor.execute("SELECT voice_channel_id FROM rooms WHERE room_id=?", (self.room_id,))
+        row = cursor.fetchone()
+        if row:
+            voice_id = row[0]
+            voice_channel = interaction.guild.get_channel(voice_id)
+            if voice_channel:
+                if game_val in ["롤", "리그오브레전드"]:
+                    channel_name = "┋⚔️┋리그오브레전드"
+                elif "옵치" in game_val or "오버워치" in game_val:
+                    channel_name = f"┋⌚┋{game_val}"
+                else:
+                    channel_name = f" {game_val}"
+                
+                try:
+                    await voice_channel.edit(name=channel_name)
+                except:
+                    pass
+
+        # 메시지 업데이트
+        await interaction.response.edit_message(embed=make_embed(self.room_id, interaction.guild), view=RoomView(self.room_id))
+        await interaction.followup.send("✅ 모집 정보가 수정되었습니다.", ephemeral=True)
 
 class CreateModal(discord.ui.Modal, title="모집 생성"):
     game = discord.ui.TextInput(label="게임")
