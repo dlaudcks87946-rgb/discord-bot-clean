@@ -144,7 +144,11 @@ async def on_voice_state_update(member, before, after):
         },
         1511037391765504130: {
             "category_id": 1427312936098992262,
-            "channel_name": "⚡・『 종합게임 』"
+            "channel_name": "💫・『 종합게임 』"
+        },
+        1510992054174351510: {
+            "category_id": 1511040771241935069,
+            "channel_name": "🫧・『 싱글게임 』"
         }
     }
 
