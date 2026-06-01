@@ -132,6 +132,53 @@ async def on_member_join(member):
     except Exception as e:
         print(f"❌ 입장 확인 중 오류 발생: {e}")
 
+# 동적 음성 채널 생성 이벤트
+@bot.event
+async def on_voice_state_update(member, before, after):
+    # 허브 채널 및 대상 설정
+    HUB_CHANNEL_ID = 1510992054174351510
+    CATEGORY_ID = 1370683863096889384
+    NEW_CHANNEL_NAME = "🫧・『 싱글게임 』"
+
+    # 1. 허브 채널 입장 감지 및 채널 생성
+    if after.channel and after.channel.id == HUB_CHANNEL_ID:
+        guild = member.guild
+        category = guild.get_channel(CATEGORY_ID)
+        
+        if category and isinstance(category, discord.CategoryChannel):
+            try:
+                # 지정된 카테고리 하위에 새 음성 채널 생성
+                new_channel = await guild.create_voice_channel(
+                    name=NEW_CHANNEL_NAME,
+                    category=category
+                )
+                print(f"🔊 새 음성 채널 생성 완료: '{NEW_CHANNEL_NAME}' (ID: {new_channel.id})")
+                
+                # 유저를 생성된 채널로 이동
+                await member.move_to(new_channel)
+                print(f"➡️ {member.name} 님을 '{NEW_CHANNEL_NAME}' 채널로 이동시켰습니다.")
+            except discord.Forbidden:
+                print("❌ 권한 부족: 채널 생성 또는 멤버 이동 권한이 없습니다.")
+            except Exception as e:
+                print(f"❌ 음성 채널 생성/이동 중 오류 발생: {e}")
+        else:
+            print(f"❌ 오류: 카테고리 ID {CATEGORY_ID}를 찾을 수 없거나 올바른 카테고리가 아닙니다.")
+
+    # 2. 유저 퇴장 감지 및 빈 임시 채널 삭제
+    if before.channel and before.channel != after.channel:
+        # 퇴장한 채널이 대상 카테고리에 속해 있고, 허브 채널이 아닌 경우
+        if before.channel.category and before.channel.category.id == CATEGORY_ID:
+            if before.channel.id != HUB_CHANNEL_ID:
+                # 채널이 비어 있는지 확인 (멤버 수가 0인 경우)
+                if len(before.channel.members) == 0:
+                    try:
+                        await before.channel.delete()
+                        print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
+                    except discord.Forbidden:
+                        print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
+                    except Exception as e:
+                        print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
+
 # Run Flask server and start Discord bot
 keep_alive()
 bot.run(os.getenv("TOKEN"))
