@@ -79,6 +79,57 @@ def add_voice_time(user_id, use_date, seconds):
     except Exception as e:
         print(f"❌ DB 이용시간 저장 중 오류 발생: {e}")
 
+def get_realtime_today_stats():
+    try:
+        today_str = get_current_date()
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, seconds FROM voice_usage WHERE use_date = ?", (today_str,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        stats = {user_id: seconds for user_id, seconds in rows}
+        
+        # 현재 음성 채널에 접속 중인 멤버들의 세션 시간 실시간 합산
+        now = time.time()
+        for uid, join_time in active_sessions.items():
+            active_duration = int(now - join_time)
+            if active_duration > 0:
+                stats[uid] = stats.get(uid, 0) + active_duration
+                
+        sorted_stats = sorted(stats.items(), key=lambda x: x[1], reverse=True)
+        return sorted_stats
+    except Exception as e:
+        print(f"❌ 실시간 오늘의 통계 집계 중 오류 발생: {e}")
+        return []
+
+def get_realtime_cumulative_stats():
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, SUM(seconds) FROM voice_usage GROUP BY user_id")
+        rows = cursor.fetchall()
+        conn.close()
+        
+        stats = {user_id: (int(secs) if secs is not None else 0) for user_id, secs in rows}
+        
+        # 현재 음성 채널에 접속 중인 멤버들의 세션 시간 실시간 합산
+        now = time.time()
+        for uid, join_time in active_sessions.items():
+            active_duration = int(now - join_time)
+            if active_duration > 0:
+                stats[uid] = stats.get(uid, 0) + active_duration
+                
+        sorted_stats = sorted(
+            [(uid, secs) for uid, secs in stats.items() if secs > 0],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        return sorted_stats
+    except Exception as e:
+        print(f"❌ 실시간 누적 통계 집계 중 오류 발생: {e}")
+        return []
+
 def format_time(seconds):
     hours = seconds // 3600
     minutes = (seconds % 3600) // 60
@@ -199,11 +250,7 @@ class VoiceUsagePanel(discord.ui.View):
     @discord.ui.button(label="오늘의 랭킹", style=discord.ButtonStyle.success, custom_id="check_voice_today_btn")
     async def check_today(self, interaction: discord.Interaction, button: discord.ui.Button):
         today_str = get_current_date()
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, seconds FROM voice_usage WHERE use_date = ? ORDER BY seconds DESC", (today_str,))
-        rows = cursor.fetchall()
-        conn.close()
+        rows = get_realtime_today_stats()
         
         if not rows:
             embed = discord.Embed(
@@ -235,14 +282,7 @@ class VoiceUsagePanel(discord.ui.View):
 
     @discord.ui.button(label="누적 전체 랭킹", style=discord.ButtonStyle.primary, custom_id="check_voice_cumulative_btn")
     async def check_cumulative(self, interaction: discord.Interaction, button: discord.ui.Button):
-        conn = sqlite3.connect(db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT user_id, SUM(seconds) FROM voice_usage GROUP BY user_id ORDER BY SUM(seconds) DESC")
-        rows = cursor.fetchall()
-        conn.close()
-        
-        # None 및 0 필터링
-        rows = [(uid, int(secs) if secs is not None else 0) for uid, secs in rows if secs and secs > 0]
+        rows = get_realtime_cumulative_stats()
         
         if not rows:
             embed = discord.Embed(
