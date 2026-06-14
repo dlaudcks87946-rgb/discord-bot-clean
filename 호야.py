@@ -447,24 +447,49 @@ async def on_message(message):
         if all(kw in content for kw in keywords):
             member = message.author
             if isinstance(member, discord.Member):
+                # 제거할 역할 (ID: 1369712767631626313)
                 target_role_id = 1369712767631626313
-                role = message.guild.get_role(target_role_id)
-                if role:
-                    if role in member.roles:
+                role_to_remove = message.guild.get_role(target_role_id)
+                
+                # 부여할 역할 (ID: 1497939431473287238)
+                grant_role_id = 1497939431473287238
+                role_to_grant = message.guild.get_role(grant_role_id)
+                
+                # 역할 부여 처리
+                grant_success = False
+                if role_to_grant:
+                    try:
+                        await member.add_roles(role_to_grant)
+                        print(f"✅ 역할 부여 완료: {member.name}에게 '{role_to_grant.name}' 역할을 부여했습니다.")
+                        grant_success = True
+                    except discord.Forbidden:
+                        print(f"❌ 권한 부족: '{role_to_grant.name}' 역할을 부여할 수 없습니다. 봇의 역할 서열을 올려주세요.")
+                    except Exception as e:
+                        print(f"❌ 역할 부여 오류: {e}")
+                else:
+                    print(f"❌ 오류: 역할 ID {grant_role_id}를 서버에서 찾을 수 없습니다.")
+
+                # 역할 제거 처리
+                if role_to_remove:
+                    if role_to_remove in member.roles:
                         try:
-                            await member.remove_roles(role)
+                            await member.remove_roles(role_to_remove)
                             await message.add_reaction("✅")
                             # 안내 메시지 전송 후 5초 뒤 자동 삭제
-                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role.name}** 역할이 제거되었습니다.", mention_author=False)
+                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.", mention_author=False)
                             await asyncio.sleep(5)
                             await msg.delete()
                         except discord.Forbidden:
-                            print(f"❌ 권한 부족: '{role.name}' 역할을 제거할 수 없습니다. 봇의 역할 서열을 올려주세요.")
+                            print(f"❌ 권한 부족: '{role_to_remove.name}' 역할을 제거할 수 없습니다. 봇의 역할 서열을 올려주세요.")
                         except Exception as e:
                             print(f"❌ 역할 제거 오류: {e}")
                     else:
                         # 이미 역할이 없는 경우에도 확인 리액션은 달아줌
                         await message.add_reaction("✅")
+                        if grant_success and role_to_grant:
+                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.", mention_author=False)
+                            await asyncio.sleep(5)
+                            await msg.delete()
                 else:
                     print(f"❌ 오류: 역할 ID {target_role_id}를 서버에서 찾을 수 없습니다.")
 
