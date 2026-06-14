@@ -487,6 +487,7 @@ async def on_member_remove(member):
 # 유저 입장 감지 이벤트
 @bot.event
 async def on_member_join(member):
+    # 최근 업데이트: 입장 시 1369712767631626313 부여 및 1497939431473287238 제거
     # 입장 시 역할 부여 (역할 ID: 1369712767631626313)
     target_role_id = 1369712767631626313
     role = member.guild.get_role(target_role_id)
