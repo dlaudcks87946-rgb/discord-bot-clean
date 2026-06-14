@@ -487,6 +487,20 @@ async def on_member_remove(member):
 # 유저 입장 감지 이벤트
 @bot.event
 async def on_member_join(member):
+    # 입장 시 역할 부여 (역할 ID: 1369712767631626313)
+    target_role_id = 1369712767631626313
+    role = member.guild.get_role(target_role_id)
+    if role:
+        try:
+            await member.add_roles(role)
+            print(f"✅ 역할 부여 완료: {member.name}에게 '{role.name}' 역할을 부여했습니다.")
+        except discord.Forbidden:
+            print(f"❌ 권한 부족: '{role.name}' 역할을 부여할 수 없습니다. 봇의 역할 서열을 올려주세요.")
+        except Exception as e:
+            print(f"❌ 역할 부여 중 오류 발생: {e}")
+    else:
+        print(f"❌ 오류: 역할 ID {target_role_id}를 서버에서 찾을 수 없습니다.")
+
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
