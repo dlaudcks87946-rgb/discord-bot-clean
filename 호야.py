@@ -501,6 +501,20 @@ async def on_member_join(member):
     else:
         print(f"❌ 오류: 역할 ID {target_role_id}를 서버에서 찾을 수 없습니다.")
 
+    # 입장 시 역할 제거 (역할 ID: 1497939431473287238)
+    remove_role_id = 1497939431473287238
+    role_to_remove = member.guild.get_role(remove_role_id)
+    if role_to_remove:
+        try:
+            await member.remove_roles(role_to_remove)
+            print(f"✅ 역할 제거 완료: {member.name}에게서 '{role_to_remove.name}' 역할을 제거했습니다.")
+        except discord.Forbidden:
+            print(f"❌ 권한 부족: '{role_to_remove.name}' 역할을 제거할 수 없습니다. 봇의 역할 서열을 올려주세요.")
+        except Exception as e:
+            print(f"❌ 역할 제거 중 오류 발생: {e}")
+    else:
+        print(f"❌ 오류: 역할 ID {remove_role_id}를 서버에서 찾을 수 없습니다.")
+
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
