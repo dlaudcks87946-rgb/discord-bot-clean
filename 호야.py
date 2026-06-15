@@ -2,6 +2,7 @@
 import discord
 from discord.ext import commands
 import os
+import sys
 from flask import Flask
 from threading import Thread
 import asyncio
@@ -50,7 +51,9 @@ conn.close()
 active_sessions = {}
 
 def get_current_date():
-    return datetime.datetime.now().strftime("%Y-%m-%d")
+    # 현재 시간에서 6시간을 빼서 오전 6시를 하루의 시작 기준으로 설정
+    adjusted_now = datetime.datetime.now() - datetime.timedelta(hours=6)
+    return adjusted_now.strftime("%Y-%m-%d")
 
 def get_recent_dates():
     try:
@@ -333,32 +336,41 @@ class VoiceUsagePanel(discord.ui.View):
         view = DateSelectView(dates)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-def get_seconds_until_midnight():
+def get_seconds_until_next_reset():
     now = datetime.datetime.now()
-    tomorrow = now + datetime.timedelta(days=1)
-    midnight = datetime.datetime(tomorrow.year, tomorrow.month, tomorrow.day, 0, 0, 0)
-    return (midnight - now).total_seconds()
+    # 오늘 오전 6시 설정
+    reset_time = now.replace(hour=6, minute=0, second=0, microsecond=0)
+    # 현재 시간이 이미 오늘 오전 6시 이후라면, 다음 초기화는 내일 오전 6시임
+    if now >= reset_time:
+        reset_time += datetime.timedelta(days=1)
+    return (reset_time - now).total_seconds()
 
 async def daily_reset_task():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        seconds = get_seconds_until_midnight()
-        print(f"⏰ 다음 00시 데이터 분할 대기 시간: {seconds}초")
+        seconds = get_seconds_until_next_reset()
+        print(f"⏰ 다음 오전 06시 데이터 분할 및 재시작 대기 시간: {seconds}초")
         await asyncio.sleep(seconds)
         
         try:
-            # 현재 음성 채널에 남아 있는 유저들의 누적 시간을 어제 날짜로 기록하고 시작 시점을 자정으로 갱신
+            # 현재 음성 채널에 남아 있는 유저들의 누적 시간을 어제 날짜로 기록하고 시작 시점을 오전 6시로 갱신
             now = time.time()
-            yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+            # 6시 정각 리셋이므로, 이전 날짜(6시간 1분 전)를 기준으로 저장
+            target_date = (datetime.datetime.now() - datetime.timedelta(hours=6, minutes=1)).strftime("%Y-%m-%d")
             
             for uid, join_time in list(active_sessions.items()):
                 duration = int(now - join_time)
                 if duration > 0:
-                    add_voice_time(uid, yesterday, duration)
+                    add_voice_time(uid, target_date, duration)
                 active_sessions[uid] = now
-            print("📅 00시 정각: 자정 기준 음성 채널 이용 시간 데이터 정리가 완료되었습니다.")
+            print(f"📅 오전 06시 정각: {target_date} 기준 음성 채널 이용 시간 데이터 정리가 완료되었습니다.")
+            
+            # 오전 6시 자동 재시작 진행
+            print("🔄 오전 06시 자동 재시작을 진행합니다...")
+            await bot.close()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as e:
-            print(f"❌ 일일 데이터 정리 중 오류 발생: {e}")
+            print(f"❌ 일일 데이터 정리 및 재시작 중 오류 발생: {e}")
             
         await asyncio.sleep(10)
 
@@ -442,9 +454,16 @@ async def on_message(message):
     # 지정한 채널 ID 확인
     if message.channel.id == 1497843456960364726:
         content = message.content
-        # 양식에 필요한 핵심 키워드들이 모두 포함되어 있는지 검사
-        keywords = ["닉네임/나이", "주로하는 게임", "플레이 시간대", "소개글"]
-        if all(kw in content for kw in keywords):
+        # 공백을 모두 제거하여 띄어쓰기 오차 무시
+        content_stripped = "".join(content.split())
+        
+        # 유연한 키워드 매칭 조건 설정
+        has_nickname = "닉네임/나이" in content_stripped or "닉넴/나이" in content_stripped
+        has_game = "주로하는게임" in content_stripped
+        has_time = "플레이시간대" in content_stripped
+        has_intro = "소개글" in content_stripped
+        
+        if has_nickname and has_game and has_time and has_intro:
             member = message.author
             if isinstance(member, discord.Member):
                 # 제거할 역할 (ID: 1369712767631626313)
