@@ -13,6 +13,7 @@ import datetime
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# DATABASE_URL 환경변수(Railway PostgreSQL) 유무에 따라 자동으로 PostgreSQL 또는 로컬 SQLite 데이터베이스를 반환합니다.
 def get_db_connection():
     if DATABASE_URL:
         # Railway PostgreSQL (postgres://를 postgresql://로 치환하여 psycopg2 호환)
@@ -29,6 +30,11 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
+    
+    if DATABASE_URL:
+        print("🔌 [데이터베이스] Railway PostgreSQL 모드로 정상 연결되었습니다.")
+    else:
+        print("💾 [데이터베이스] 로컬 SQLite 모드로 연결되었습니다. (Railway 배포 환경에서는 재시작 시 데이터가 유실되므로 PostgreSQL 추가가 필요합니다.)")
     
     # user_id 등 디스코드 ID를 다루기 위해 SQLite는 INTEGER, PostgreSQL은 BIGINT로 설정
     user_id_type = "BIGINT" if DATABASE_URL else "INTEGER"
