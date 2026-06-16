@@ -11,6 +11,8 @@ import psycopg2
 import time
 import datetime
 
+# Railway 프로젝트에서 데이터베이스 영구 보존을 위해 PostgreSQL 서비스를 추가한 후,
+# 봇 서비스의 Variables 탭에서 DATABASE_URL 변수를 추가하고 값으로 ${{Postgres.DATABASE_URL}} 을 연결해 주어야 이 환경변수를 인식합니다.
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # DATABASE_URL 환경변수(Railway PostgreSQL) 유무에 따라 자동으로 PostgreSQL 또는 로컬 SQLite 데이터베이스를 반환합니다.
