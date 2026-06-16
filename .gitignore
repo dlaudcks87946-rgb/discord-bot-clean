@@ -1,0 +1,4 @@
+bot_data.db
+rooms.db
+__pycache__/
+*.pyc

@@ -101,7 +101,7 @@ def get_recent_dates():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT DISTINCT use_date FROM voice_usage ORDER BY use_date DESC LIMIT 30")
+        cursor.execute("SELECT DISTINCT use_date FROM voice_usage ORDER BY use_date DESC LIMIT 100")
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
@@ -292,11 +292,20 @@ class DateSelect(discord.ui.Select):
 class DateSelectView(discord.ui.View):
     def __init__(self, dates):
         super().__init__(timeout=180)  # 3분 제한
-        if len(dates) <= 15:
-            self.add_item(DateSelect(dates, placeholder="조회할 날짜를 선택하세요..."))
-        else:
-            self.add_item(DateSelect(dates[:15], placeholder="최근 날짜 선택 (1~15일)..."))
-            self.add_item(DateSelect(dates[15:30], placeholder="이전 날짜 선택 (16~30일)..."))
+        # 디스코드 선택 메뉴는 최대 25개 옵션까지 지원하므로, 날짜 데이터를 20개 단위로 쪼개어 드롭다운을 생성합니다.
+        # 최대 5개의 드롭다운(총 100일 분량)까지 한 메시지에 등록 가능합니다.
+        chunk_size = 20
+        visible_dates = dates[:100]
+        
+        for i in range(0, len(visible_dates), chunk_size):
+            chunk = visible_dates[i:i+chunk_size]
+            start_num = i + 1
+            end_num = i + len(chunk)
+            if i == 0:
+                placeholder = f"최근 날짜 선택 (1~{end_num}일)..."
+            else:
+                placeholder = f"이전 날짜 선택 ({start_num}~{end_num}일)..."
+            self.add_item(DateSelect(chunk, placeholder=placeholder))
 
 class VoiceUsagePanel(discord.ui.View):
     def __init__(self):
