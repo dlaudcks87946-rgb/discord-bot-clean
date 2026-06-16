@@ -7,45 +7,79 @@ from flask import Flask
 from threading import Thread
 import asyncio
 import sqlite3
+import psycopg2
 import time
 import datetime
 
-# DB 파일 연결 및 테이블 생성
-db_path = "bot_data.db"
-conn = sqlite3.connect(db_path)
-cursor = conn.cursor()
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS left_users (
-    user_id INTEGER PRIMARY KEY
-)
-""")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# 마이그레이션 확인
-try:
-    cursor.execute("PRAGMA table_info(voice_usage);")
-    columns = [info[1] for info in cursor.fetchall()]
-    if columns and "use_date" not in columns:
-        cursor.execute("DROP TABLE voice_usage;")
-        print("⚠️ 마이그레이션: 기존 voice_usage 테이블을 삭제하고 새 스키마로 생성합니다.")
-except Exception as migration_err:
-    print(f"❌ 마이그레이션 검사 중 오류 발생: {migration_err}")
+def get_db_connection():
+    if DATABASE_URL:
+        # Railway PostgreSQL (postgres://를 postgresql://로 치환하여 psycopg2 호환)
+        url = DATABASE_URL
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+        return psycopg2.connect(url)
+    else:
+        # SQLite
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        db_path = os.path.join(base_dir, "bot_data.db")
+        return sqlite3.connect(db_path)
 
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS voice_usage (
-    user_id INTEGER,
-    use_date TEXT,
-    seconds INTEGER DEFAULT 0,
-    PRIMARY KEY (user_id, use_date)
-)
-""")
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS voice_panel (
-    channel_id INTEGER PRIMARY KEY,
-    message_id INTEGER
-)
-""")
-conn.commit()
-conn.close()
+def init_db():
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # user_id 등 디스코드 ID를 다루기 위해 SQLite는 INTEGER, PostgreSQL은 BIGINT로 설정
+    user_id_type = "BIGINT" if DATABASE_URL else "INTEGER"
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS left_users (
+        user_id {user_id_type} PRIMARY KEY
+    )
+    """)
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS voice_usage (
+        user_id {user_id_type},
+        use_date TEXT,
+        seconds INTEGER DEFAULT 0,
+        PRIMARY KEY (user_id, use_date)
+    )
+    """)
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS voice_panel (
+        channel_id {user_id_type} PRIMARY KEY,
+        message_id {user_id_type}
+    )
+    """)
+    
+    # SQLite 마이그레이션 확인 (PostgreSQL에서는 신규 테이블이므로 패스)
+    if not DATABASE_URL:
+        try:
+            cursor.execute("PRAGMA table_info(voice_usage);")
+            columns = [info[1] for info in cursor.fetchall()]
+            if columns and "use_date" not in columns:
+                cursor.execute("DROP TABLE voice_usage;")
+                print("⚠️ 마이그레이션: 기존 voice_usage 테이블을 삭제하고 새 스키마로 생성합니다.")
+                cursor.execute(f"""
+                CREATE TABLE IF NOT EXISTS voice_usage (
+                    user_id {user_id_type},
+                    use_date TEXT,
+                    seconds INTEGER DEFAULT 0,
+                    PRIMARY KEY (user_id, use_date)
+                )
+                """)
+        except Exception as migration_err:
+            print(f"❌ 마이그레이션 검사 중 오류 발생: {migration_err}")
+            
+    conn.commit()
+    cursor.close()
+    conn.close()
+
+# DB 초기화 실행
+init_db()
 
 # Active voice sessions tracking (user_id -> join_timestamp)
 active_sessions = {}
@@ -57,10 +91,11 @@ def get_current_date():
 
 def get_recent_dates():
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT DISTINCT use_date FROM voice_usage ORDER BY use_date DESC LIMIT 30")
         rows = cursor.fetchall()
+        cursor.close()
         conn.close()
         return [row[0] for row in rows]
     except Exception as e:
@@ -69,15 +104,19 @@ def get_recent_dates():
 
 def add_voice_time(user_id, use_date, seconds):
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT seconds FROM voice_usage WHERE user_id = ? AND use_date = ?", (user_id, use_date))
-        row = cursor.fetchone()
-        if row:
-            cursor.execute("UPDATE voice_usage SET seconds = seconds + ? WHERE user_id = ? AND use_date = ?", (seconds, user_id, use_date))
-        else:
-            cursor.execute("INSERT INTO voice_usage (user_id, use_date, seconds) VALUES (?, ?, ?)", (user_id, use_date, seconds))
+        p = "%s" if DATABASE_URL else "?"
+        # ON CONFLICT 구문은 SQLite 3.24.0+ 및 PostgreSQL에서 작동합니다.
+        query = f"""
+        INSERT INTO voice_usage (user_id, use_date, seconds)
+        VALUES ({p}, {p}, {p})
+        ON CONFLICT (user_id, use_date)
+        DO UPDATE SET seconds = voice_usage.seconds + EXCLUDED.seconds
+        """
+        cursor.execute(query, (user_id, use_date, seconds))
         conn.commit()
+        cursor.close()
         conn.close()
     except Exception as e:
         print(f"❌ DB 이용시간 저장 중 오류 발생: {e}")
@@ -85,10 +124,12 @@ def add_voice_time(user_id, use_date, seconds):
 def get_realtime_today_stats():
     try:
         today_str = get_current_date()
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, seconds FROM voice_usage WHERE use_date = ?", (today_str,))
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT user_id, seconds FROM voice_usage WHERE use_date = {p}", (today_str,))
         rows = cursor.fetchall()
+        cursor.close()
         conn.close()
         
         stats = {user_id: seconds for user_id, seconds in rows}
@@ -108,10 +149,11 @@ def get_realtime_today_stats():
 
 def get_realtime_cumulative_stats():
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT user_id, SUM(seconds) FROM voice_usage GROUP BY user_id")
         rows = cursor.fetchall()
+        cursor.close()
         conn.close()
         
         stats = {user_id: (int(secs) if secs is not None else 0) for user_id, secs in rows}
@@ -203,10 +245,12 @@ class DateSelect(discord.ui.Select):
     async def callback(self, interaction: discord.Interaction):
         selected_date = self.values[0]
         
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id, seconds FROM voice_usage WHERE use_date = ? ORDER BY seconds DESC", (selected_date,))
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT user_id, seconds FROM voice_usage WHERE use_date = {p} ORDER BY seconds DESC", (selected_date,))
         rows = cursor.fetchall()
+        cursor.close()
         conn.close()
         
         if not rows:
@@ -386,9 +430,10 @@ async def on_ready():
     channel = bot.get_channel(target_channel_id)
     if channel:
         try:
-            conn = sqlite3.connect(db_path)
+            conn = get_db_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT message_id FROM voice_panel WHERE channel_id = ?", (target_channel_id,))
+            p = "%s" if DATABASE_URL else "?"
+            cursor.execute(f"SELECT message_id FROM voice_panel WHERE channel_id = {p}", (target_channel_id,))
             row = cursor.fetchone()
             panel_msg_id = row[0] if row else None
             
@@ -399,7 +444,7 @@ async def on_ready():
                     panel_exists = True
                 except discord.NotFound:
                     # 기존 메시지가 삭제됨
-                    cursor.execute("DELETE FROM voice_panel WHERE channel_id = ?", (target_channel_id,))
+                    cursor.execute(f"DELETE FROM voice_panel WHERE channel_id = {p}", (target_channel_id,))
                     conn.commit()
             
             if not panel_exists:
@@ -409,11 +454,20 @@ async def on_ready():
                     color=discord.Color.blurple()
                 )
                 msg = await channel.send(embed=embed, view=VoiceUsagePanel())
-                cursor.execute("INSERT OR REPLACE INTO voice_panel (channel_id, message_id) VALUES (?, ?)", (target_channel_id, msg.id))
+                
+                # SQLite와 PostgreSQL 공용 ON CONFLICT 문법
+                query = f"""
+                INSERT INTO voice_panel (channel_id, message_id)
+                VALUES ({p}, {p})
+                ON CONFLICT (channel_id)
+                DO UPDATE SET message_id = EXCLUDED.message_id
+                """
+                cursor.execute(query, (target_channel_id, msg.id))
                 conn.commit()
                 print(f"📊 이용 시간 조회 패널 메시지 생성 완료 (ID: {msg.id})")
             else:
                 print("📊 이용 시간 조회 패널 메시지가 이미 존재합니다.")
+            cursor.close()
             conn.close()
         except Exception as db_err:
             print(f"❌ 패널 메시지 확인/생성 중 DB 오류 발생: {db_err}")
@@ -519,10 +573,13 @@ async def on_message(message):
 async def on_member_remove(member):
     # 유저가 서버를 나가면 DB에 기록
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("INSERT OR IGNORE INTO left_users (user_id) VALUES (?)", (member.id,))
+        p = "%s" if DATABASE_URL else "?"
+        query = f"INSERT INTO left_users (user_id) VALUES ({p}) ON CONFLICT (user_id) DO NOTHING"
+        cursor.execute(query, (member.id,))
         conn.commit()
+        cursor.close()
         conn.close()
         print(f"📥 유저 퇴장 기록 완료: {member.name} ({member.id})")
     except Exception as e:
@@ -569,9 +626,10 @@ async def on_member_join(member):
         print(f"❌ 오류: 역할 ID {remove_role_id}를 서버에서 찾을 수 없습니다.")
 
     try:
-        conn = sqlite3.connect(db_path)
+        conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM left_users WHERE user_id = ?", (member.id,))
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT user_id FROM left_users WHERE user_id = {p}", (member.id,))
         row = cursor.fetchone()
         
         if row:
@@ -587,10 +645,11 @@ async def on_member_join(member):
                 print(f"❌ 알림 채널({channel_id})을 찾을 수 없습니다.")
                 
             # 기록에서 삭제
-            cursor.execute("DELETE FROM left_users WHERE user_id = ?", (member.id,))
+            cursor.execute(f"DELETE FROM left_users WHERE user_id = {p}", (member.id,))
             conn.commit()
             print(f"📤 재입장 확인 후 DB 기록 삭제: {member.name} ({member.id})")
             
+        cursor.close()
         conn.close()
     except Exception as e:
         print(f"❌ 입장 확인 중 오류 발생: {e}")
