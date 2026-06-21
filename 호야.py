@@ -1088,9 +1088,11 @@ async def on_ready():
         print("⏰ 시즌 패스 음성 XP 적립 루프 시작 완료")
 
     try:
-        # Sync slash commands
-        synced = await bot.tree.sync()
-        print(f"✅ 슬래시 명령어 {len(synced)}개 동기화 완료")
+        # 소속된 모든 서버(길드)에 즉시 동기화되도록 설정
+        for guild in bot.guilds:
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+        print(f"✅ 소속된 모든 서버({len(bot.guilds)}개)에 슬래시 명령어 즉시 동기화 완료")
     except Exception as e:
         print(f"❌ 슬래시 명령어 동기화 오류: {e}")
 
