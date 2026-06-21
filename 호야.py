@@ -532,8 +532,8 @@ def open_jackpot_box(user_id: int):
             cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (10000, user_id))
             result = "💰 재화 10,000 획득!"
         elif roll <= 80:
-            cursor.execute(f"UPDATE users SET premium_box = premium_box + 3 WHERE user_id={p}", (user_id,))
-            result = "🎁 프리미엄 랜덤 상자 3개 획득!"
+            cursor.execute(f"UPDATE users SET premium_box = premium_box + 5 WHERE user_id={p}", (user_id,))
+            result = "🎁 프리미엄 랜덤 상자 5개 획득!"
         elif roll <= 95:
             cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
             row = cursor.fetchone()
@@ -631,7 +631,7 @@ def box_info_embed():
         name="👑 잭팟 상자",
         value=(
             "50% → 💰 재화 10,000\n"
-            "30% → 🎁 프리미엄 랜덤 상자 3개\n"
+            "30% → 🎁 프리미엄 랜덤 상자 5개\n"
             "15% → 💎 XP 부스터 90일\n"
             "5% → 🌟 특별 칭호권"
         ),
