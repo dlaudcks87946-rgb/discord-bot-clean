@@ -1,6 +1,7 @@
 # test deploy
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
+from discord import app_commands
 import os
 import sys
 from flask import Flask
@@ -10,6 +11,7 @@ import sqlite3
 import psycopg2
 import time
 import datetime
+import random
 
 # Railway 프로젝트에서 데이터베이스 영구 보존을 위해 PostgreSQL 서비스를 추가한 후,
 # 봇 서비스의 Variables 탭에서 DATABASE_URL 변수를 추가하고 값으로 ${{Postgres.DATABASE_URL}} 을 연결해 주어야 이 환경변수를 인식합니다.
@@ -60,6 +62,20 @@ def init_db():
     CREATE TABLE IF NOT EXISTS voice_panel (
         channel_id {user_id_type} PRIMARY KEY,
         message_id {user_id_type}
+    )
+    """)
+
+    # HEAVEN 시즌 패스 users 테이블 생성
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS users (
+        user_id {user_id_type} PRIMARY KEY,
+        xp INTEGER DEFAULT 0,
+        coin INTEGER DEFAULT 0,
+        random_box INTEGER DEFAULT 0,
+        premium_box INTEGER DEFAULT 0,
+        jackpot_box INTEGER DEFAULT 0,
+        booster_until BIGINT DEFAULT 0,
+        voice_minutes INTEGER DEFAULT 0
     )
     """)
     
@@ -195,6 +211,433 @@ def format_time(seconds):
     if secs > 0 or not parts:
         parts.append(f"{secs}초")
     return " ".join(parts)
+
+
+# ==========================================
+# HEAVEN 시즌 패스 DB 헬퍼 및 비즈니스 로직
+# ==========================================
+def ensure_user(user_id: int):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute("INSERT INTO users(user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (user_id,))
+        else:
+            cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ ensure_user 오류: {e}")
+
+def get_user(user_id: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"""
+            SELECT xp, coin, random_box, premium_box, jackpot_box, booster_until, voice_minutes
+            FROM users WHERE user_id={p}
+        """, (user_id,))
+        row = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        return row
+    except Exception as e:
+        print(f"❌ get_user 오류: {e}")
+        return (0, 0, 0, 0, 0, 0, 0)
+
+def add_coin(user_id: int, amount: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (amount, user_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ add_coin 오류: {e}")
+
+def add_item(user_id: int, item: str, amount: int):
+    allowed_items = ["random_box", "premium_box", "jackpot_box"]
+    if item not in allowed_items:
+        raise ValueError("Invalid item name")
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"UPDATE users SET {item} = {item} + {p} WHERE user_id={p}", (amount, user_id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ add_item 오류: {e}")
+
+def use_item(user_id: int, item: str):
+    allowed_items = ["random_box", "premium_box", "jackpot_box"]
+    if item not in allowed_items:
+        raise ValueError("Invalid item name")
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT {item} FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        count = row[0] if row else 0
+
+        if count <= 0:
+            cursor.close()
+            conn.close()
+            return False
+
+        cursor.execute(f"UPDATE users SET {item} = {item} - 1 WHERE user_id={p}", (user_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"❌ use_item 오류: {e}")
+        return False
+
+# 레벨업 보상 테이블
+REWARDS = {
+    5: ("coin", 500, "💰 재화 500"),
+    10: ("item", "random_box", 1, "📦 랜덤 상자 1개"),
+    15: ("coin", 1000, "💰 재화 1,000"),
+    20: ("booster", 1, "💎 XP 부스터 1일"),
+    25: ("coin", 2500, "💰 재화 2,500"),
+    30: ("item", "random_box", 2, "📦 랜덤 상자 2개"),
+    35: ("coin", 3000, "💰 재화 3,000"),
+    40: ("booster", 7, "💎 XP 부스터 7일"),
+    45: ("item", "random_box", 5, "📦 랜덤 상자 5개"),
+    50: ("item", "premium_box", 1, "🎁 프리미엄 랜덤 상자")
+}
+
+def level_from_xp(xp: int):
+    level = 1
+    need = 300
+    while xp >= need:
+        xp -= need
+        level += 1
+        need = 300 + (level - 1) * 100
+    return level, xp, need
+
+def progress_bar(current, total, size=10):
+    filled = int((current / total) * size) if total > 0 else 0
+    return "█" * filled + "░" * (size - filled)
+
+def next_reward(level: int):
+    for lv, (_, _, r_name) in REWARDS.items():
+        if lv > level:
+            return f"Lv.{lv} 달성 시 {r_name}"
+    return "모든 패스 보상 달성 완료"
+
+def check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp):
+    old_level, _, _ = level_from_xp(old_xp)
+    new_level, _, _ = level_from_xp(new_xp)
+    rewards_granted = []
+    if new_level > old_level:
+        for lv in range(old_level + 1, new_level + 1):
+            if lv in REWARDS:
+                r_type, r_val, r_name = REWARDS[lv]
+                if r_type == "coin":
+                    cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (r_val, user_id))
+                elif r_type == "item":
+                    cursor.execute(f"UPDATE users SET {r_val} = {r_val} + {p} WHERE user_id={p}", (r_val, user_id))
+                elif r_type == "booster":
+                    now = int(time.time())
+                    duration = r_val * 86400
+                    cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
+                    row = cursor.fetchone()
+                    curr_booster = row[0] if row else 0
+                    new_booster = max(curr_booster, now) + duration
+                    cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+                rewards_granted.append(r_name)
+    return rewards_granted
+
+def add_xp(user_id: int, amount: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        cursor.execute(f"SELECT xp FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        old_xp = row[0] if row else 0
+        new_xp = old_xp + amount
+        
+        cursor.execute(f"UPDATE users SET xp = xp + {p}, voice_minutes = voice_minutes + 1 WHERE user_id={p}",
+                       (amount, user_id))
+        
+        rewards = check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp)
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return rewards
+    except Exception as e:
+        print(f"❌ add_xp 오류: {e}")
+        return []
+
+# 상점 구매 비즈니스 로직
+def buy_shop_item(user_id: int, item_type: str, cost: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT coin, booster_until FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            conn.close()
+            return False, "유저 정보를 찾을 수 없습니다."
+        
+        coins, booster_until = row
+        if coins < cost:
+            cursor.close()
+            conn.close()
+            return False, f"❌ 재화가 부족합니다. (보유: {coins:,} / 필요: {cost:,})"
+        
+        cursor.execute(f"UPDATE users SET coin = coin - {p} WHERE user_id={p}", (cost, user_id))
+        
+        now = int(time.time())
+        if item_type == "random_box":
+            cursor.execute(f"UPDATE users SET random_box = random_box + 1 WHERE user_id={p}", (user_id,))
+            msg = "📦 랜덤 상자 1개를 구매했습니다!"
+        elif item_type == "premium_box":
+            cursor.execute(f"UPDATE users SET premium_box = premium_box + 1 WHERE user_id={p}", (user_id,))
+            msg = "🎁 프리미엄 랜덤 상자 1개를 구매했습니다!"
+        elif item_type == "booster_1d":
+            new_booster = max(booster_until, now) + 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            msg = "💎 XP 부스터 1일을 구매했습니다!"
+        elif item_type == "booster_7d":
+            new_booster = max(booster_until, now) + 7 * 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            msg = "💎 XP 부스터 7일을 구매했습니다!"
+        else:
+            cursor.close()
+            conn.close()
+            return False, "올바르지 않은 상품입니다."
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True, msg
+    except Exception as e:
+        print(f"❌ buy_shop_item 오류: {e}")
+        return False, "구매 처리 중 오류가 발생했습니다."
+
+# 상자 열기 비즈니스 로직
+def open_random_box(user_id: int):
+    roll = random.randint(1, 100)
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        if roll <= 40:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (1000, user_id))
+            result = "💰 재화 1,000 획득!"
+        elif roll <= 65:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (2500, user_id))
+            result = "💰 재화 2,500 획득!"
+        elif roll <= 80:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (5000, user_id))
+            result = "💰 재화 5,000 획득!"
+        elif roll <= 90:
+            cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
+            row = cursor.fetchone()
+            curr_booster = row[0] if row else 0
+            new_booster = max(curr_booster, now) + 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            result = "💎 XP 부스터 1일 획득!"
+        elif roll <= 97:
+            cursor.execute(f"UPDATE users SET premium_box = premium_box + 1 WHERE user_id={p}", (user_id,))
+            result = "🎁 프리미엄 랜덤 상자 1개 획득!"
+        else:
+            cursor.execute(f"UPDATE users SET jackpot_box = jackpot_box + 1 WHERE user_id={p}", (user_id,))
+            result = "👑 잭팟 상자 1개 획득!"
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"❌ open_random_box 오류: {e}")
+        return "상자를 여는 도중 오류가 발생했습니다."
+
+def open_premium_box(user_id: int):
+    roll = random.randint(1, 100)
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        if roll <= 40:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (5000, user_id))
+            result = "💰 재화 5,000 획득!"
+        elif roll <= 65:
+            cursor.execute(f"UPDATE users SET random_box = random_box + 10 WHERE user_id={p}", (user_id,))
+            result = "📦 랜덤 상자 10개 획득!"
+        elif roll <= 80:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (7500, user_id))
+            result = "💰 재화 7,500 획득!"
+        elif roll <= 90:
+            cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
+            row = cursor.fetchone()
+            curr_booster = row[0] if row else 0
+            new_booster = max(curr_booster, now) + 7 * 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            result = "💎 XP 부스터 7일 획득!"
+        elif roll <= 97:
+            cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
+            row = cursor.fetchone()
+            curr_booster = row[0] if row else 0
+            new_booster = max(curr_booster, now) + 30 * 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            result = "💎 XP 부스터 30일 획득!"
+        else:
+            cursor.execute(f"UPDATE users SET jackpot_box = jackpot_box + 1 WHERE user_id={p}", (user_id,))
+            result = "👑 잭팟 상자 1개 획득!"
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"❌ open_premium_box 오류: {e}")
+        return "상자를 여는 도중 오류가 발생했습니다."
+
+def open_jackpot_box(user_id: int):
+    roll = random.randint(1, 100)
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        if roll <= 50:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (10000, user_id))
+            result = "💰 재화 10,000 획득!"
+        elif roll <= 80:
+            cursor.execute(f"UPDATE users SET premium_box = premium_box + 3 WHERE user_id={p}", (user_id,))
+            result = "🎁 프리미엄 랜덤 상자 3개 획득!"
+        elif roll <= 95:
+            cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
+            row = cursor.fetchone()
+            curr_booster = row[0] if row else 0
+            new_booster = max(curr_booster, now) + 90 * 86400
+            cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
+            result = "💎 XP 부스터 90일 획득!"
+        else:
+            result = "🌟 특별 칭호권 획득! (관리자에게 문의해주세요.)"
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return result
+    except Exception as e:
+        print(f"❌ open_jackpot_box 오류: {e}")
+        return "상자를 여는 도중 오류가 발생했습니다."
+
+# 임베드 생성 함수들
+def pass_embed(member: discord.Member):
+    xp, coin, random_box, premium_box, jackpot_box, booster_until, voice_minutes = get_user(member.id)
+    level, current_xp, need_xp = level_from_xp(xp)
+
+    embed = discord.Embed(
+        title="🎫 HEAVEN 시즌 패스",
+        description=f"{member.mention}님의 실시간 패스 정보",
+        color=0x8e44ad
+    )
+
+    embed.add_field(name="레벨", value=f"Lv.{level}", inline=True)
+    embed.add_field(name="XP", value=f"{current_xp} / {need_xp}", inline=True)
+    embed.add_field(name="진행도", value=progress_bar(current_xp, need_xp), inline=False)
+
+    embed.add_field(name="💰 보유 재화", value=f"{coin:,}", inline=True)
+    embed.add_field(name="🎤 누적 음성시간", value=f"{voice_minutes:,}분", inline=True)
+
+    embed.add_field(
+        name="📦 보유 상자",
+        value=f"랜덤 상자: {random_box}개\n프리미엄 상자: {premium_box}개\n잭팟 상자: {jackpot_box}개",
+        inline=False
+    )
+
+    now = int(time.time())
+    if booster_until > now:
+        booster_status = f"🔥 활성화 중 (만료: <t:{booster_until}:F> / <t:{booster_until}:R>)"
+    else:
+        booster_status = "❌ 비활성화"
+    embed.add_field(name="💎 XP 부스터", value=booster_status, inline=False)
+
+    embed.add_field(name="🎁 다음 보상", value=next_reward(level), inline=False)
+    return embed
+
+def shop_embed():
+    embed = discord.Embed(
+        title="🛒 HEAVEN 상점",
+        description="버튼으로 구매할 상품을 선택하세요.",
+        color=0x2ecc71
+    )
+    embed.add_field(name="📦 랜덤 상자", value="3,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 1일", value="3,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 7일", value="15,000 재화", inline=False)
+    embed.add_field(name="🎁 프리미엄 랜덤 상자", value="10,000 재화", inline=False)
+    return embed
+
+def box_info_embed():
+    embed = discord.Embed(
+        title="📦 상자 확률표",
+        color=0xf1c40f
+    )
+    embed.add_field(
+        name="📦 랜덤 상자",
+        value=(
+            "40% → 💰 재화 1,000\n"
+            "25% → 💰 재화 2,500\n"
+            "15% → 💰 재화 5,000\n"
+            "10% → 💎 XP 부스터 1일\n"
+            "7% → 🎁 프리미엄 랜덤 상자\n"
+            "3% → 👑 잭팟 상자"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="🎁 프리미엄 랜덤 상자",
+        value=(
+            "40% → 💰 재화 5,000\n"
+            "25% → 📦 랜덤 상자 10개\n"
+            "15% → 💰 재화 7,500\n"
+            "10% → 💎 XP 부스터 7일\n"
+            "7% → 💎 XP 부스터 30일\n"
+            "3% → 👑 잭팟 상자"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="👑 잭팟 상자",
+        value=(
+            "50% → 💰 재화 10,000\n"
+            "30% → 🎁 프리미엄 랜덤 상자 3개\n"
+            "15% → 💎 XP 부스터 90일\n"
+            "5% → 🌟 특별 칭호권"
+        ),
+        inline=False
+    )
+    return embed
 
 
 # Flask Web Server to keep the bot alive
@@ -397,6 +840,82 @@ class VoiceUsagePanel(discord.ui.View):
         view = DateSelectView(dates)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
+
+# =========================
+# 버튼 View (시즌 패스 및 상점)
+# =========================
+class PassPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="내 패스 보기", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="heaven_pass:my_pass")
+    async def my_pass(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=pass_embed(interaction.user),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="상점 보기", emoji="🛒", style=discord.ButtonStyle.success, custom_id="heaven_pass:shop")
+    async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=shop_embed(),
+            view=ShopPanelView(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="상자 확률", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:box_info")
+    async def box_info(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=box_info_embed(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random")
+    async def open_random(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not use_item(interaction.user.id, "random_box"):
+            return await interaction.response.send_message("❌ 보유한 랜덤 상자가 없습니다.", ephemeral=True)
+        result = open_random_box(interaction.user.id)
+        await interaction.response.send_message(f"📦 랜덤 상자 개봉!\n\n{result}", ephemeral=True)
+
+    @discord.ui.button(label="프리미엄 상자 열기", emoji="🎁", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_premium")
+    async def open_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not use_item(interaction.user.id, "premium_box"):
+            return await interaction.response.send_message("❌ 보유한 프리미엄 랜덤 상자가 없습니다.", ephemeral=True)
+        result = open_premium_box(interaction.user.id)
+        await interaction.response.send_message(f"🎁 프리미엄 랜덤 상자 개봉!\n\n{result}", ephemeral=True)
+
+    @discord.ui.button(label="잭팟 상자 열기", emoji="👑", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_jackpot")
+    async def open_jackpot(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not use_item(interaction.user.id, "jackpot_box"):
+            return await interaction.response.send_message("❌ 보유한 잭팟 상자가 없습니다.", ephemeral=True)
+        result = open_jackpot_box(interaction.user.id)
+        await interaction.response.send_message(f"👑 잭팟 상자 개봉!\n\n{result}", ephemeral=True)
+
+
+class ShopPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="📦 랜덤 상자 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_random")
+    async def buy_random(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = buy_shop_item(interaction.user.id, "random_box", 3000)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="💎 부스터 1일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_1d")
+    async def buy_booster_1d(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 3000)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="💎 부스터 7일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_7d")
+    async def buy_booster_7d(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 15000)
+        await interaction.response.send_message(msg, ephemeral=True)
+
+    @discord.ui.button(label="🎁 프리미엄 상자 구매", style=discord.ButtonStyle.danger, custom_id="heaven_shop:buy_premium")
+    async def buy_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
+        success, msg = buy_shop_item(interaction.user.id, "premium_box", 10000)
+        await interaction.response.send_message(msg, ephemeral=True)
+
 def get_seconds_until_next_reset():
     now = datetime.datetime.now()
     # 오늘 오전 6시 설정
@@ -435,12 +954,67 @@ async def daily_reset_task():
             
         await asyncio.sleep(10)
 
+
+# =========================
+# 음성 XP 분당 적립 루프
+# =========================
+@tasks.loop(minutes=1)
+async def voice_xp_loop():
+    user_ids = list(active_sessions.keys())
+    if not user_ids:
+        return
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        # 1. 유저 데이터 존재 보장
+        for uid in user_ids:
+            if DATABASE_URL:
+                cursor.execute("INSERT INTO users(user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING", (uid,))
+            else:
+                cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (uid,))
+        conn.commit()
+        
+        # 2. XP 및 부스터 확인 및 일괄 업데이트
+        placeholders = ", ".join([p] * len(user_ids))
+        cursor.execute(f"SELECT user_id, xp, booster_until FROM users WHERE user_id IN ({placeholders})", tuple(user_ids))
+        rows = cursor.fetchall()
+        user_data = {row[0]: {"xp": row[1], "booster_until": row[2]} for row in rows}
+        
+        now = int(time.time())
+        for uid in user_ids:
+            data = user_data.get(uid, {"xp": 0, "booster_until": 0})
+            old_xp = data["xp"]
+            booster_until = data["booster_until"]
+            
+            is_booster_active = booster_until > now
+            xp_to_add = 2 if is_booster_active else 1
+            new_xp = old_xp + xp_to_add
+            
+            cursor.execute(
+                f"UPDATE users SET xp = xp + {p}, voice_minutes = voice_minutes + 1 WHERE user_id = {p}",
+                (xp_to_add, uid)
+            )
+            
+            check_and_grant_level_rewards(cursor, p, uid, old_xp, new_xp)
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"🎙️ [시즌패스] 음성 활성 유저 {len(user_ids)}명 XP 지급 및 레벨업 체크 완료")
+    except Exception as e:
+        print(f"❌ voice_xp_loop 오류: {e}")
+
 @bot.event
 async def on_ready():
     print(f"✅ 로그인 성공: {bot.user.name} ({bot.user.id})")
     
     # 1. 영구 뷰 등록
     bot.add_view(VoiceUsagePanel())
+    bot.add_view(PassPanelView())
+    bot.add_view(ShopPanelView())
     
     # 2. 지정된 채널에 패널 메시지가 있는지 확인 및 자동 복구/생성
     target_channel_id = 1513160056214913144
@@ -507,6 +1081,11 @@ async def on_ready():
     # 4. 일일 데이터 정렬/분할 스케줄러 태스크 시작
     asyncio.create_task(daily_reset_task())
     print("⏰ 일일 음성 채널 데이터 정리 태스크 시작 완료")
+    
+    # 5. 시즌 패스 XP 적립 루프 시작
+    if not voice_xp_loop.is_running():
+        voice_xp_loop.start()
+        print("⏰ 시즌 패스 음성 XP 적립 루프 시작 완료")
 
     try:
         # Sync slash commands
@@ -514,6 +1093,55 @@ async def on_ready():
         print(f"✅ 슬래시 명령어 {len(synced)}개 동기화 완료")
     except Exception as e:
         print(f"❌ 슬래시 명령어 동기화 오류: {e}")
+
+
+# =========================
+# 관리자 명령어 (시즌 패스)
+# =========================
+@bot.tree.command(name="패스패널생성", description="HEAVEN 시즌 패스 버튼 패널을 생성합니다.")
+@app_commands.default_permissions(administrator=True)
+async def create_pass_panel(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎫 HEAVEN 시즌 패스",
+        description=(
+            "음성채널에 참여하고 XP를 모아 보상을 받아보세요.\n\n"
+            "🎤 음성채널 1분 = 1 XP (부스터 적용 시 2배!)\n"
+            "📦 아래 버튼을 눌러 내 패스 확인, 상점 이용, 상자 개봉 등을 진행할 수 있습니다."
+        ),
+        color=0x9b59b6
+    )
+    await interaction.response.send_message(embed=embed, view=PassPanelView())
+
+@bot.tree.command(name="재화지급", description="관리자용 재화 지급")
+@app_commands.default_permissions(administrator=True)
+async def give_coin(interaction: discord.Interaction, member: discord.Member, amount: int):
+    add_coin(member.id, amount)
+    await interaction.response.send_message(f"✅ {member.mention}에게 재화 {amount:,} 지급 완료.", ephemeral=True)
+
+@bot.tree.command(name="상자지급", description="관리자용 상자 지급")
+@app_commands.default_permissions(administrator=True)
+@app_commands.choices(box_type=[
+    app_commands.Choice(name="📦 랜덤 상자", value="random_box"),
+    app_commands.Choice(name="🎁 프리미엄 상자", value="premium_box"),
+    app_commands.Choice(name="👑 잭팟 상자", value="jackpot_box")
+])
+async def give_box(interaction: discord.Interaction, member: discord.Member, box_type: str, amount: int):
+    add_item(member.id, box_type, amount)
+    box_names = {
+        "random_box": "랜덤 상자",
+        "premium_box": "프리미엄 상자",
+        "jackpot_box": "잭팟 상자"
+    }
+    await interaction.response.send_message(f"✅ {member.mention}에게 {box_names[box_type]} {amount}개 지급 완료.", ephemeral=True)
+
+@bot.tree.command(name="xp지급", description="관리자용 XP 지급")
+@app_commands.default_permissions(administrator=True)
+async def give_xp(interaction: discord.Interaction, member: discord.Member, amount: int):
+    rewards = add_xp(member.id, amount)
+    msg = f"✅ {member.mention}에게 XP {amount:,} 지급 완료."
+    if rewards:
+        msg += f"\n🎁 지급 과정에서 레벨업 보상 획득: {', '.join(rewards)}"
+    await interaction.response.send_message(msg, ephemeral=True)
 
 
 # 양식 입력 확인 및 역할 제거 이벤트
