@@ -1007,20 +1007,29 @@ async def voice_xp_loop():
                 cursor.execute("INSERT OR IGNORE INTO users(user_id) VALUES (?)", (uid,))
         conn.commit()
         
-        # 2. XP 및 부스터 확인 및 일괄 업데이트
+        # 2. XP, 부스터, 음성 시간 확인 및 일괄 업데이트
         placeholders = ", ".join([p] * len(user_ids))
-        cursor.execute(f"SELECT user_id, xp, booster_until FROM users WHERE user_id IN ({placeholders})", tuple(user_ids))
+        cursor.execute(f"SELECT user_id, xp, booster_until, voice_minutes FROM users WHERE user_id IN ({placeholders})", tuple(user_ids))
         rows = cursor.fetchall()
-        user_data = {row[0]: {"xp": row[1], "booster_until": row[2]} for row in rows}
+        user_data = {row[0]: {"xp": row[1], "booster_until": row[2], "voice_minutes": row[3]} for row in rows}
         
         now = int(time.time())
         for uid in user_ids:
-            data = user_data.get(uid, {"xp": 0, "booster_until": 0})
+            data = user_data.get(uid, {"xp": 0, "booster_until": 0, "voice_minutes": 0})
             old_xp = data["xp"]
             booster_until = data["booster_until"]
+            old_voice_mins = data["voice_minutes"] if data["voice_minutes"] is not None else 0
             
             is_booster_active = booster_until > now
-            xp_to_add = 2 if is_booster_active else 1
+            # 기본 분당 1에서 5로 변경 (부스터 2배 시 10)
+            xp_to_add = 10 if is_booster_active else 5
+            
+            # 누적 음성 60분 도달 시마다 보너스 50 XP 추가 지급
+            new_voice_mins = old_voice_mins + 1
+            if new_voice_mins > 0 and new_voice_mins % 60 == 0:
+                xp_to_add += 50
+                print(f"🎁 [시즌패스] {uid}님 누적 음성 {new_voice_mins}분 달성 보너스 50 XP 지급!")
+                
             new_xp = old_xp + xp_to_add
             
             cursor.execute(
@@ -1137,7 +1146,8 @@ async def create_pass_panel(interaction: discord.Interaction):
         title="🎫 HEAVEN 시즌 패스",
         description=(
             "음성채널에 참여하고 XP를 모아 보상을 받아보세요.\n\n"
-            "🎤 음성채널 1분 = 1 XP (부스터 적용 시 2배!)\n"
+            "🎤 음성채널 1분 = 5 XP (부스터 적용 시 10 XP!)\n"
+            "🎁 누적 음성 60분 참여할 때마다 보너스 +50 XP 추가 지급!\n\n"
             "📦 아래 버튼을 눌러 내 패스 확인, 상점 이용, 상자 개봉 등을 진행할 수 있습니다."
         ),
         color=0x9b59b6
