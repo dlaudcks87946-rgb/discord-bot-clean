@@ -592,10 +592,10 @@ def shop_embed():
         description="버튼으로 구매할 상품을 선택하세요.",
         color=0x2ecc71
     )
-    embed.add_field(name="📦 랜덤 상자", value="3,000 재화", inline=False)
-    embed.add_field(name="💎 XP 부스터 1일", value="3,000 재화", inline=False)
-    embed.add_field(name="💎 XP 부스터 7일", value="15,000 재화", inline=False)
-    embed.add_field(name="🎁 프리미엄 랜덤 상자", value="10,000 재화", inline=False)
+    embed.add_field(name="📦 랜덤 상자", value="2,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 1일", value="2,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 7일", value="10,000 재화", inline=False)
+    embed.add_field(name="🎁 프리미엄 랜덤 상자", value="8,000 재화", inline=False)
     return embed
 
 def box_info_embed():
@@ -928,22 +928,22 @@ class ShopPanelView(discord.ui.View):
 
     @discord.ui.button(label="📦 랜덤 상자 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_random")
     async def buy_random(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "random_box", 3000)
+        success, msg = buy_shop_item(interaction.user.id, "random_box", 2000)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="💎 부스터 1일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_1d")
     async def buy_booster_1d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 3000)
+        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 2000)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="💎 부스터 7일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_7d")
     async def buy_booster_7d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 15000)
+        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 10000)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="🎁 프리미엄 상자 구매", style=discord.ButtonStyle.danger, custom_id="heaven_shop:buy_premium")
     async def buy_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "premium_box", 10000)
+        success, msg = buy_shop_item(interaction.user.id, "premium_box", 8000)
         await interaction.response.send_message(msg, ephemeral=True)
 
 def get_seconds_until_next_reset():
