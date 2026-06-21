@@ -639,6 +639,29 @@ def box_info_embed():
     )
     return embed
 
+def rewards_info_embed():
+    embed = discord.Embed(
+        title="🎫 HEAVEN 시즌 패스 전체 보상 목록",
+        description="레벨 달성 시 인벤토리 및 계정에 즉시 자동 지급되는 보상들입니다.",
+        color=0x9b59b6
+    )
+    
+    reward_lines = [
+        "⭐ **Lv.5** : 💰 재화 500",
+        "⭐ **Lv.10** : 📦 랜덤 상자 1개",
+        "⭐ **Lv.15** : 💰 재화 1,000",
+        "⭐ **Lv.20** : 💎 XP 부스터 1일",
+        "⭐ **Lv.25** : 💰 재화 2,500",
+        "⭐ **Lv.30** : 📦 랜덤 상자 2개",
+        "⭐ **Lv.35** : 💰 재화 3,000",
+        "⭐ **Lv.40** : 💎 XP 부스터 7일",
+        "⭐ **Lv.45** : 📦 랜덤 상자 5개",
+        "⭐ **Lv.50** : 🎁 프리미엄 랜덤 상자"
+    ]
+    
+    embed.description = "\n".join(reward_lines)
+    return embed
+
 
 # Flask Web Server to keep the bot alive
 app = Flask('')
@@ -867,6 +890,13 @@ class PassPanelView(discord.ui.View):
     async def box_info(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             embed=box_info_embed(),
+            ephemeral=True
+        )
+
+    @discord.ui.button(label="전체 보상", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:all_rewards")
+    async def all_rewards(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=rewards_info_embed(),
             ephemeral=True
         )
 
