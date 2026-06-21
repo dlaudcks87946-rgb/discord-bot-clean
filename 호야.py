@@ -1182,6 +1182,10 @@ async def on_message(message):
     if message.author.bot:
         return
 
+    # 특정 채널(ID: 1516049566535909439)의 메시지는 봇이 무시하도록 설정
+    if message.channel.id == 1516049566535909439:
+        return
+
     # 지정한 채널 ID 확인
     if message.channel.id == 1497843456960364726:
         content = message.content
