@@ -337,6 +337,19 @@ def next_reward(level: int):
             return f"Lv.{lv} 달성 시 {r_name}"
     return "모든 패스 보상 달성 완료"
 
+def get_season_pass_rankings():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, xp FROM users ORDER BY xp DESC")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"❌ get_season_pass_rankings 오류: {e}")
+        return []
+
 def check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp):
     old_level, _, _ = level_from_xp(old_xp)
     new_level, _, _ = level_from_xp(new_xp)
@@ -686,6 +699,34 @@ intents.members = True
 # Bot initialization
 bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
+class PassRankingView(discord.ui.View):
+    def __init__(self, full_rows):
+        super().__init__(timeout=180)  # 3분 제한
+        self.full_rows = full_rows
+
+    @discord.ui.button(label="더보기", style=discord.ButtonStyle.primary, custom_id="show_more_pass_ranking")
+    async def show_more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🏆 HEAVEN 시즌 패스 전체 랭킹",
+            color=0x8e44ad
+        )
+        
+        desc_lines = []
+        # 디스코드 글자 수 제한(4096자)을 방지하기 위해 상위 50명까지 표시
+        limit_rows = self.full_rows[:50]
+        for idx, (user_id, xp) in enumerate(limit_rows, 1):
+            level, _, _ = level_from_xp(xp)
+            desc_lines.append(f"{idx}등: <@{user_id}> - Lv.{level} ({xp:,} XP)")
+            
+        if len(self.full_rows) > 50:
+            desc_lines.append("\n*상위 50명까지 표시됩니다.*")
+            
+        embed.description = "\n".join(desc_lines)
+        
+        # 버튼 제거
+        self.clear_items()
+        await interaction.response.edit_message(embed=embed, view=self)
+
 class VoiceUsageView(discord.ui.View):
     def __init__(self, full_rows):
         super().__init__(timeout=86400)  # 24시간
@@ -899,6 +940,38 @@ class PassPanelView(discord.ui.View):
             embed=rewards_info_embed(),
             ephemeral=True
         )
+
+    @discord.ui.button(label="랭킹 보기", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:ranking")
+    async def ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        rows = get_season_pass_rankings()
+        if not rows:
+            embed = discord.Embed(
+                title="🏆 HEAVEN 시즌 패스 랭킹",
+                description="시즌 패스 랭킹 기록이 없습니다.",
+                color=0x8e44ad
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="🏆 HEAVEN 시즌 패스 랭킹 (Top 5)",
+            color=0x8e44ad
+        )
+        
+        top_5 = rows[:5]
+        desc_lines = []
+        for idx, (user_id, xp) in enumerate(top_5, 1):
+            level, _, _ = level_from_xp(xp)
+            desc_lines.append(f"{idx}등: <@{user_id}> - Lv.{level} ({xp:,} XP)")
+            
+        if len(rows) > 5:
+            desc_lines.append("\n*6등 이하의 기록은 아래 버튼을 눌러 확인하세요.*")
+            embed.description = "\n".join(desc_lines)
+            view = PassRankingView(rows)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            embed.description = "\n".join(desc_lines)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random")
     async def open_random(self, interaction: discord.Interaction, button: discord.ui.Button):
