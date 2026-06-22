@@ -65,7 +65,6 @@ def init_db():
     )
     """)
 
-    # HEAVEN 시즌 패스 users 테이블 생성
     cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS users (
         user_id {user_id_type} PRIMARY KEY,
@@ -76,6 +75,17 @@ def init_db():
         jackpot_box INTEGER DEFAULT 0,
         booster_until BIGINT DEFAULT 0,
         voice_minutes INTEGER DEFAULT 0
+    )
+    """)
+    
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS user_quests (
+        user_id {user_id_type},
+        quest_id TEXT,
+        progress INTEGER DEFAULT 0,
+        claimed INTEGER DEFAULT 0,
+        quest_date TEXT,
+        PRIMARY KEY (user_id, quest_id, quest_date)
     )
     """)
     
@@ -318,6 +328,27 @@ REWARDS = {
     50: ("item", "jackpot_box", 1, "👑 잭팟 상자 1개")
 }
 
+DAILY_QUESTS = {
+    "voice_30m": {
+        "title": "🎙️ 음성 채널 30분 참여하기",
+        "target": 30,
+        "xp_reward": 100,
+        "coin_reward": 500
+    },
+    "open_box": {
+        "title": "📦 아무 상자 1회 오픈하기",
+        "target": 1,
+        "xp_reward": 50,
+        "coin_reward": 300
+    },
+    "buy_shop": {
+        "title": "🛒 상점에서 상품 1회 구매하기",
+        "target": 1,
+        "xp_reward": 50,
+        "coin_reward": 300
+    }
+}
+
 def level_from_xp(xp: int):
     level = 1
     need = 300
@@ -372,6 +403,101 @@ def check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp):
                     cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
                 rewards_granted.append(r_name)
     return rewards_granted
+def update_quest_progress(user_id: int, quest_id: str, amount: int = 1):
+    try:
+        today = get_current_date()
+        ensure_user(user_id)
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        if DATABASE_URL:
+            cursor.execute("""
+                INSERT INTO user_quests (user_id, quest_id, progress, claimed, quest_date)
+                VALUES (%s, %s, %s, 0, %s)
+                ON CONFLICT (user_id, quest_id, quest_date)
+                DO UPDATE SET progress = user_quests.progress + EXCLUDED.progress
+            """, (user_id, quest_id, amount, today))
+        else:
+            cursor.execute("""
+                INSERT INTO user_quests (user_id, quest_id, progress, claimed, quest_date)
+                VALUES (?, ?, ?, 0, ?)
+                ON CONFLICT (user_id, quest_id, quest_date)
+                DO UPDATE SET progress = user_quests.progress + EXCLUDED.progress
+            """, (user_id, quest_id, amount, today))
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ update_quest_progress 오류: {e}")
+
+def claim_all_quests_calc(user_id: int):
+    today = get_current_date()
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        cursor.execute(f"""
+            SELECT quest_id, progress, claimed FROM user_quests
+            WHERE user_id = {p} AND quest_date = {p}
+        """, (user_id, today))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        quest_data = {row[0]: {"progress": row[1], "claimed": row[2]} for row in rows}
+        
+        total_xp = 0
+        total_coins = 0
+        claimed_quests = []
+        
+        for q_id, q_info in DAILY_QUESTS.items():
+            db_info = quest_data.get(q_id, {"progress": 0, "claimed": 0})
+            if db_info["progress"] >= q_info["target"] and not db_info["claimed"]:
+                total_xp += q_info["xp_reward"]
+                total_coins += q_info["coin_reward"]
+                claimed_quests.append(q_id)
+                
+        if not claimed_quests:
+            return False, "수령할 수 있는 퀘스트 보상이 없습니다."
+            
+        return True, (total_xp, total_coins, claimed_quests)
+        
+    except Exception as e:
+        print(f"❌ claim_all_quests_calc 오류: {e}")
+        return False, "보상 계산 중 오류가 발생했습니다."
+
+def apply_claimed_quests(user_id: int, total_xp: int, total_coins: int, claimed_quests: list):
+    today = get_current_date()
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        placeholders = ", ".join([p] * len(claimed_quests))
+        cursor.execute(f"""
+            UPDATE user_quests SET claimed = 1
+            WHERE user_id = {p} AND quest_date = {p} AND quest_id IN ({placeholders})
+        """, (user_id, today) + tuple(claimed_quests))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        add_coin(user_id, total_coins)
+        rewards_granted = add_xp(user_id, total_xp)
+        
+        msg = f"🎉 **일일 퀘스트 보상 일괄 수령 완료**\n\n계정으로 아래 보상이 즉시 지급되었습니다:\n\n* 💰 **+{total_coins:,} 코인**\n* ⭐ **+{total_xp:,} XP**"
+        if rewards_granted:
+            msg += f"\n\n🎁 **레벨업 달성 보상 획득!**\n└ {', '.join(rewards_granted)}"
+            
+        return msg
+    except Exception as e:
+        print(f"❌ apply_claimed_quests 오류: {e}")
+        return "보상을 지급하는 도중 오류가 발생했습니다."
 
 def add_xp(user_id: int, amount: int):
     ensure_user(user_id)
@@ -385,7 +511,7 @@ def add_xp(user_id: int, amount: int):
         old_xp = row[0] if row else 0
         new_xp = old_xp + amount
         
-        cursor.execute(f"UPDATE users SET xp = xp + {p}, voice_minutes = voice_minutes + 1 WHERE user_id={p}",
+        cursor.execute(f"UPDATE users SET xp = xp + {p} WHERE user_id={p}",
                        (amount, user_id))
         
         rewards = check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp)
@@ -442,6 +568,7 @@ def buy_shop_item(user_id: int, item_type: str, cost: int):
         conn.commit()
         cursor.close()
         conn.close()
+        update_quest_progress(user_id, "buy_shop", 1)
         return True, msg
     except Exception as e:
         print(f"❌ buy_shop_item 오류: {e}")
@@ -598,6 +725,84 @@ def pass_embed(member: discord.Member):
 
     embed.add_field(name="🎁 다음 보상", value=next_reward(level), inline=False)
     return embed
+
+def quest_embed(user_id: int):
+    today = get_current_date()
+    ensure_user(user_id)
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = "%s" if DATABASE_URL else "?"
+    
+    cursor.execute(f"""
+        SELECT quest_id, progress, claimed FROM user_quests
+        WHERE user_id = {p} AND quest_date = {p}
+    """, (user_id, today))
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    
+    quest_data = {row[0]: {"progress": row[1], "claimed": row[2]} for row in rows}
+    
+    embed = discord.Embed(
+        title="📜 오늘의 일일 퀘스트",
+        description="매일 오전 6시에 초기화되는 시즌 패스 일일 미션입니다.\n미션을 달성하고 보상을 수령하세요!",
+        color=0x3498db
+    )
+    
+    for q_id, q_info in DAILY_QUESTS.items():
+        db_info = quest_data.get(q_id, {"progress": 0, "claimed": 0})
+        progress = min(db_info["progress"], q_info["target"])
+        target = q_info["target"]
+        
+        status_str = ""
+        if db_info["claimed"]:
+            status_str = "✅ **보상 수령 완료**"
+        elif progress >= target:
+            status_str = "🎁 **수령 가능 (아래 일괄 수령 버튼을 누르세요)**"
+        else:
+            status_str = f"⚡ 진행도: `{progress}/{target}`"
+            
+        embed.add_field(
+            name=q_info["title"],
+            value=(
+                f"{status_str}\n"
+                f"└ 보상: ⭐ {q_info['xp_reward']} XP / 💰 {q_info['coin_reward']} 코인"
+            ),
+            inline=False
+        )
+        
+    return embed
+
+class QuestPanelView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+
+    @discord.ui.button(label="보상 일괄 수령", emoji="🎁", style=discord.ButtonStyle.success, custom_id="heaven_quest:claim_all")
+    async def claim_all(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ 본인의 퀘스트 보상만 수령할 수 있습니다.", ephemeral=True)
+            
+        await interaction.response.send_message("🎁 퀘스트 보상 가방을 여는 중... ⚙️", ephemeral=True)
+        await asyncio.sleep(0.5)
+        
+        success, res = claim_all_quests_calc(interaction.user.id)
+        if not success:
+            return await interaction.edit_original_response(content=f"❌ {res}")
+            
+        total_xp, total_coins, claimed_quests = res
+        
+        await interaction.edit_original_response(content=f"💰 재화 정산 중... (+{total_coins:,} 코인) 💸")
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content=f"⭐ 경험치 획득 중... (+{total_xp:,} XP) ✨")
+        await asyncio.sleep(0.5)
+        
+        msg = apply_claimed_quests(interaction.user.id, total_xp, total_coins, claimed_quests)
+        await interaction.edit_original_response(content=msg)
+        
+        new_embed = quest_embed(interaction.user.id)
+        await interaction.message.edit(embed=new_embed, view=self)
 
 def shop_embed():
     embed = discord.Embed(
@@ -973,26 +1178,82 @@ class PassPanelView(discord.ui.View):
             embed.description = "\n".join(desc_lines)
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @discord.ui.button(label="일일 퀘스트", emoji="📋", style=discord.ButtonStyle.primary, custom_id="heaven_pass:quests")
+    async def quests(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=quest_embed(interaction.user.id),
+            view=QuestPanelView(interaction.user.id),
+            ephemeral=True
+        )
+
     @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random")
     async def open_random(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not use_item(interaction.user.id, "random_box"):
             return await interaction.response.send_message("❌ 보유한 랜덤 상자가 없습니다.", ephemeral=True)
+            
+        update_quest_progress(interaction.user.id, "open_box", 1)
+        
+        await interaction.response.send_message("📦 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="📦 흔들흔들... 상자가 빛나기 시작합니다! 💫")
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
+        await asyncio.sleep(0.5)
+        
         result = open_random_box(interaction.user.id)
-        await interaction.response.send_message(f"📦 랜덤 상자 개봉!\n\n{result}", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="📦 랜덤 상자 개봉 완료",
+            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
+            color=0x9b59b6
+        )
+        await interaction.edit_original_response(content=None, embed=embed)
 
     @discord.ui.button(label="프리미엄 상자 열기", emoji="🎁", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_premium")
     async def open_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not use_item(interaction.user.id, "premium_box"):
             return await interaction.response.send_message("❌ 보유한 프리미엄 랜덤 상자가 없습니다.", ephemeral=True)
+            
+        update_quest_progress(interaction.user.id, "open_box", 1)
+        
+        await interaction.response.send_message("🎁 프리미엄 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="🎁 흔들흔들... 상자가 빛나기 시작합니다! 💫")
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
+        await asyncio.sleep(0.5)
+        
         result = open_premium_box(interaction.user.id)
-        await interaction.response.send_message(f"🎁 프리미엄 랜덤 상자 개봉!\n\n{result}", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="🎁 프리미엄 랜덤 상자 개봉 완료",
+            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
+            color=0xe74c3c
+        )
+        await interaction.edit_original_response(content=None, embed=embed)
 
     @discord.ui.button(label="잭팟 상자 열기", emoji="👑", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_jackpot")
     async def open_jackpot(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not use_item(interaction.user.id, "jackpot_box"):
             return await interaction.response.send_message("❌ 보유한 잭팟 상자가 없습니다.", ephemeral=True)
+            
+        update_quest_progress(interaction.user.id, "open_box", 1)
+        
+        await interaction.response.send_message("👑 잭팟 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="👑 흔들흔들... 상자가 빛나기 시작합니다! 💫")
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
+        await asyncio.sleep(0.5)
+        
         result = open_jackpot_box(interaction.user.id)
-        await interaction.response.send_message(f"👑 잭팟 상자 개봉!\n\n{result}", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="👑 잭팟 상자 개봉 완료",
+            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
+            color=0xf1c40f
+        )
+        await interaction.edit_original_response(content=None, embed=embed)
         
         if "기프티콘" in result:
             channel_id = 1518304536136253674
@@ -1096,6 +1357,7 @@ async def voice_xp_loop():
         user_data = {row[0]: {"xp": row[1], "booster_until": row[2], "voice_minutes": row[3]} for row in rows}
         
         now = int(time.time())
+        today_str = get_current_date()
         for uid in user_ids:
             data = user_data.get(uid, {"xp": 0, "booster_until": 0, "voice_minutes": 0})
             old_xp = data["xp"]
@@ -1120,6 +1382,22 @@ async def voice_xp_loop():
                 f"UPDATE users SET xp = xp + {p}, coin = coin + {p}, voice_minutes = voice_minutes + 1 WHERE user_id = {p}",
                 (xp_to_add, coin_to_add, uid)
             )
+            
+            # 일일 퀘스트 진행도 적립
+            if DATABASE_URL:
+                cursor.execute("""
+                    INSERT INTO user_quests (user_id, quest_id, progress, claimed, quest_date)
+                    VALUES (%s, 'voice_30m', 1, 0, %s)
+                    ON CONFLICT (user_id, quest_id, quest_date)
+                    DO UPDATE SET progress = user_quests.progress + EXCLUDED.progress
+                """, (uid, today_str))
+            else:
+                cursor.execute("""
+                    INSERT INTO user_quests (user_id, quest_id, progress, claimed, quest_date)
+                    VALUES (?, 'voice_30m', 1, 0, ?)
+                    ON CONFLICT (user_id, quest_id, quest_date)
+                    DO UPDATE SET progress = user_quests.progress + EXCLUDED.progress
+                """, (uid, today_str))
             
             check_and_grant_level_rewards(cursor, p, uid, old_xp, new_xp)
             
