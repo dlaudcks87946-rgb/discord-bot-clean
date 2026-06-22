@@ -555,7 +555,7 @@ def open_jackpot_box(user_id: int):
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
             result = "💎 XP 부스터 90일 획득!"
         else:
-            result = "🌟 특별 칭호권 획득! (관리자에게 문의해주세요.)"
+            result = "🎁 기프티콘 획득! (관리자에게 문의해주세요.)"
             
         conn.commit()
         cursor.close()
@@ -646,7 +646,7 @@ def box_info_embed():
             "50% → 💰 재화 10,000\n"
             "30% → 🎁 프리미엄 랜덤 상자 5개\n"
             "15% → 💎 XP 부스터 90일\n"
-            "5% → 🌟 특별 칭호권"
+            "5% → 🎁 기프티콘"
         ),
         inline=False
     )
@@ -993,6 +993,15 @@ class PassPanelView(discord.ui.View):
             return await interaction.response.send_message("❌ 보유한 잭팟 상자가 없습니다.", ephemeral=True)
         result = open_jackpot_box(interaction.user.id)
         await interaction.response.send_message(f"👑 잭팟 상자 개봉!\n\n{result}", ephemeral=True)
+        
+        if "기프티콘" in result:
+            channel_id = 1518304536136253674
+            try:
+                channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+                if channel:
+                    await channel.send(f"🎉 **[기프티콘 당첨]** {interaction.user.mention}님이 잭팟 상자에서 **기프티콘**에 당첨되었습니다! (관리자분들은 확인 후 기프티콘을 지급해 주세요.)")
+            except Exception as e:
+                print(f"❌ 기프티콘 당첨 알림 전송 실패: {e}")
 
 
 class ShopPanelView(discord.ui.View):
@@ -1096,18 +1105,20 @@ async def voice_xp_loop():
             is_booster_active = booster_until > now
             # 기본 분당 1에서 5로 변경 (부스터 2배 시 10)
             xp_to_add = 10 if is_booster_active else 5
+            coin_to_add = 20  # 분당 20 코인 기본 지급
             
-            # 누적 음성 60분 도달 시마다 보너스 50 XP 추가 지급
+            # 누적 음성 60분 도달 시마다 보너스 50 XP 및 500 코인 추가 지급
             new_voice_mins = old_voice_mins + 1
             if new_voice_mins > 0 and new_voice_mins % 60 == 0:
                 xp_to_add += 50
-                print(f"🎁 [시즌패스] {uid}님 누적 음성 {new_voice_mins}분 달성 보너스 50 XP 지급!")
+                coin_to_add += 500
+                print(f"🎁 [시즌패스] {uid}님 누적 음성 {new_voice_mins}분 달성 보너스 50 XP & 500 코인 지급!")
                 
             new_xp = old_xp + xp_to_add
             
             cursor.execute(
-                f"UPDATE users SET xp = xp + {p}, voice_minutes = voice_minutes + 1 WHERE user_id = {p}",
-                (xp_to_add, uid)
+                f"UPDATE users SET xp = xp + {p}, coin = coin + {p}, voice_minutes = voice_minutes + 1 WHERE user_id = {p}",
+                (xp_to_add, coin_to_add, uid)
             )
             
             check_and_grant_level_rewards(cursor, p, uid, old_xp, new_xp)
@@ -1220,9 +1231,9 @@ async def create_pass_panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎫 HEAVEN 시즌 패스",
         description=(
-            "음성채널에 참여하고 XP를 모아 보상을 받아보세요.\n\n"
-            "🎤 음성채널 1분 = 5 XP (부스터 적용 시 10 XP!)\n"
-            "🎁 누적 음성 60분 참여할 때마다 보너스 +50 XP 추가 지급!\n\n"
+            "음성채널에 참여하고 XP와 재화를 모아 보상을 받아보세요.\n\n"
+            "🎤 음성채널 1분 = 5 XP (부스터 적용 시 10 XP!) & 💰 20 코인 지급!\n"
+            "🎁 누적 음성 60분 참여할 때마다 보너스 +50 XP & 💰 +500 코인 추가 지급!\n\n"
             "📦 아래 버튼을 눌러 내 패스 확인, 상점 이용, 상자 개봉 등을 진행할 수 있습니다."
         ),
         color=0x9b59b6
