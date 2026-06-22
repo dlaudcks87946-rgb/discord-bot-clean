@@ -306,16 +306,16 @@ def use_item(user_id: int, item: str):
 
 # 레벨업 보상 테이블
 REWARDS = {
-    5: ("coin", 500, "💰 재화 500"),
+    5: ("coin", None, 500, "💰 재화 500"),
     10: ("item", "random_box", 1, "📦 랜덤 상자 1개"),
-    15: ("coin", 1000, "💰 재화 1,000"),
-    20: ("booster", 1, "💎 XP 부스터 1일"),
-    25: ("coin", 2500, "💰 재화 2,500"),
-    30: ("item", "random_box", 2, "📦 랜덤 상자 2개"),
-    35: ("coin", 3000, "💰 재화 3,000"),
-    40: ("booster", 7, "💎 XP 부스터 7일"),
+    15: ("coin", None, 1000, "💰 재화 1,000"),
+    20: ("item", "random_box", 2, "📦 랜덤 상자 2개"),
+    25: ("coin", None, 2500, "💰 재화 2,500"),
+    30: ("item", "premium_box", 1, "🎁 프리미엄 상자 1개"),
+    35: ("coin", None, 3000, "💰 재화 3,000"),
+    40: ("item", "premium_box", 2, "🎁 프리미엄 상자 2개"),
     45: ("item", "random_box", 5, "📦 랜덤 상자 5개"),
-    50: ("item", "premium_box", 1, "🎁 프리미엄 랜덤 상자")
+    50: ("item", "jackpot_box", 1, "👑 잭팟 상자 1개")
 }
 
 def level_from_xp(xp: int):
@@ -332,7 +332,7 @@ def progress_bar(current, total, size=10):
     return "█" * filled + "░" * (size - filled)
 
 def next_reward(level: int):
-    for lv, (_, _, r_name) in REWARDS.items():
+    for lv, (_, _, _, r_name) in REWARDS.items():
         if lv > level:
             return f"Lv.{lv} 달성 시 {r_name}"
     return "모든 패스 보상 달성 완료"
@@ -357,14 +357,14 @@ def check_and_grant_level_rewards(cursor, p, user_id, old_xp, new_xp):
     if new_level > old_level:
         for lv in range(old_level + 1, new_level + 1):
             if lv in REWARDS:
-                r_type, r_val, r_name = REWARDS[lv]
+                r_type, r_target, r_amount, r_name = REWARDS[lv]
                 if r_type == "coin":
-                    cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (r_val, user_id))
+                    cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (r_amount, user_id))
                 elif r_type == "item":
-                    cursor.execute(f"UPDATE users SET {r_val} = {r_val} + {p} WHERE user_id={p}", (r_val, user_id))
+                    cursor.execute(f"UPDATE users SET {r_target} = {r_target} + {p} WHERE user_id={p}", (r_amount, user_id))
                 elif r_type == "booster":
                     now = int(time.time())
-                    duration = r_val * 86400
+                    duration = r_amount * 86400
                     cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
                     row = cursor.fetchone()
                     curr_booster = row[0] if row else 0
@@ -606,8 +606,8 @@ def shop_embed():
         color=0x2ecc71
     )
     embed.add_field(name="📦 랜덤 상자", value="2,000 재화", inline=False)
-    embed.add_field(name="💎 XP 부스터 1일", value="2,000 재화", inline=False)
-    embed.add_field(name="💎 XP 부스터 7일", value="10,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 1일", value="1,000 재화", inline=False)
+    embed.add_field(name="💎 XP 부스터 7일", value="5,000 재화", inline=False)
     embed.add_field(name="🎁 프리미엄 랜덤 상자", value="8,000 재화", inline=False)
     return embed
 
@@ -663,13 +663,13 @@ def rewards_info_embed():
         "⭐ **Lv.5** : 💰 재화 500",
         "⭐ **Lv.10** : 📦 랜덤 상자 1개",
         "⭐ **Lv.15** : 💰 재화 1,000",
-        "⭐ **Lv.20** : 💎 XP 부스터 1일",
+        "⭐ **Lv.20** : 📦 랜덤 상자 2개",
         "⭐ **Lv.25** : 💰 재화 2,500",
-        "⭐ **Lv.30** : 📦 랜덤 상자 2개",
+        "⭐ **Lv.30** : 🎁 프리미엄 상자 1개",
         "⭐ **Lv.35** : 💰 재화 3,000",
-        "⭐ **Lv.40** : 💎 XP 부스터 7일",
+        "⭐ **Lv.40** : 🎁 프리미엄 상자 2개",
         "⭐ **Lv.45** : 📦 랜덤 상자 5개",
-        "⭐ **Lv.50** : 🎁 프리미엄 랜덤 상자"
+        "⭐ **Lv.50** : 👑 잭팟 상자 1개"
     ]
     
     embed.description = "\n".join(reward_lines)
@@ -1015,12 +1015,12 @@ class ShopPanelView(discord.ui.View):
 
     @discord.ui.button(label="💎 부스터 1일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_1d")
     async def buy_booster_1d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 2000)
+        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 1000)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="💎 부스터 7일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_7d")
     async def buy_booster_7d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 10000)
+        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 5000)
         await interaction.response.send_message(msg, ephemeral=True)
 
     @discord.ui.button(label="🎁 프리미엄 상자 구매", style=discord.ButtonStyle.danger, custom_id="heaven_shop:buy_premium")
@@ -1231,10 +1231,11 @@ async def create_pass_panel(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎫 HEAVEN 시즌 패스",
         description=(
-            "음성채널에 참여하고 XP와 재화를 모아 보상을 받아보세요.\n\n"
-            "🎤 음성채널 1분 = 5 XP (부스터 적용 시 10 XP!) & 💰 20 코인 지급!\n"
-            "🎁 누적 음성 60분 참여할 때마다 보너스 +50 XP & 💰 +500 코인 추가 지급!\n\n"
-            "📦 아래 버튼을 눌러 내 패스 확인, 상점 이용, 상자 개봉 등을 진행할 수 있습니다."
+            "음성 채널에 참여하여 패스 레벨을 올리고 풍성한 보상을 획득하세요!\n\n"
+            "**💡 획득 방식**\n"
+            "🎤 **음성 채널 참여:** 1분당 **5 XP** (부스터 적용 시 **10 XP**) & 💰 **20 코인** 지급\n"
+            "🎁 **누적 참여 보너스:** 60분마다 **+50 XP** & 💰 **+500 코인** 추가 지급\n\n"
+            "📦 아래 버튼을 눌러 내 시즌 패스 정보를 확인하거나 상점을 이용하실 수 있습니다."
         ),
         color=0x9b59b6
     )
