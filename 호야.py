@@ -615,6 +615,80 @@ def open_random_box(user_id: int):
         print(f"❌ open_random_box 오류: {e}")
         return "상자를 여는 도중 오류가 발생했습니다."
 
+def open_random_box_multiple(user_id: int, count: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        # Check current random boxes
+        cursor.execute(f"SELECT random_box, coin, premium_box, jackpot_box, booster_until FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[2] < count:  # random_box is the 3rd column (index 2) in the SELECT list: random_box, coin, premium_box, jackpot_box, booster_until
+            cursor.close()
+            conn.close()
+            return None, "보유한 랜덤 상자가 부족합니다."
+            
+        curr_random_box, curr_coin, curr_premium_box, curr_jackpot, curr_booster = row
+        
+        added_coins = 0
+        added_booster_seconds = 0
+        added_premium_boxes = 0
+        added_jackpot_boxes = 0
+        
+        rewards_summary = {
+            "coins": 0,
+            "booster_days": 0,
+            "premium_boxes": 0,
+            "jackpot_boxes": 0
+        }
+        
+        for _ in range(count):
+            roll = random.randint(1, 100)
+            if roll <= 40:
+                added_coins += 1000
+                rewards_summary["coins"] += 1000
+            elif roll <= 65:
+                added_coins += 2500
+                rewards_summary["coins"] += 2500
+            elif roll <= 80:
+                added_coins += 5000
+                rewards_summary["coins"] += 5000
+            elif roll <= 90:
+                added_booster_seconds += 86400
+                rewards_summary["booster_days"] += 1
+            elif roll <= 97:
+                added_premium_boxes += 1
+                rewards_summary["premium_boxes"] += 1
+            else:
+                added_jackpot_boxes += 1
+                rewards_summary["jackpot_boxes"] += 1
+                
+        new_booster = max(curr_booster, now) + added_booster_seconds
+        
+        cursor.execute(
+            f"""
+            UPDATE users 
+            SET random_box = random_box - {p},
+                coin = coin + {p},
+                premium_box = premium_box + {p},
+                jackpot_box = jackpot_box + {p},
+                booster_until = {p}
+            WHERE user_id = {p}
+            """,
+            (count, added_coins, added_premium_boxes, added_jackpot_boxes, new_booster, user_id)
+        )
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return rewards_summary, None
+    except Exception as e:
+        print(f"❌ open_random_box_multiple 오류: {e}")
+        return None, "상자를 여는 도중 오류가 발생했습니다."
+
 def open_premium_box(user_id: int):
     roll = random.randint(1, 100)
     ensure_user(user_id)
@@ -1111,6 +1185,92 @@ class VoiceUsagePanel(discord.ui.View):
 
 
 # =========================
+# 상자 일괄 개봉을 위한 Select Menu 및 View
+# =========================
+class BoxOpenSelect(discord.ui.Select):
+    def __init__(self, box_count: int):
+        options = []
+        if box_count <= 25:
+            for i in range(1, box_count + 1):
+                options.append(discord.SelectOption(
+                    label=f"{i}개",
+                    value=str(i),
+                    emoji="📦",
+                    description=f"랜덤 상자 {i}개를 엽니다."
+                ))
+        else:
+            standard_options = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 250, 300, 400, 500]
+            options_to_add = [val for val in standard_options if val < box_count]
+            
+            for val in options_to_add:
+                options.append(discord.SelectOption(
+                    label=f"{val}개",
+                    value=str(val),
+                    emoji="📦",
+                    description=f"랜덤 상자 {val}개를 엽니다."
+                ))
+                
+            if len(options) >= 25:
+                options = options[:24]
+                
+            options.append(discord.SelectOption(
+                label=f"모두 열기 ({box_count}개)",
+                value=str(box_count),
+                emoji="🔥",
+                description=f"보유 중인 {box_count}개의 상자를 모두 엽니다."
+            ))
+            
+        super().__init__(
+            placeholder="열고 싶은 상자의 개수를 선택하세요...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.disabled = True
+        await interaction.response.edit_message(content="📦 상자를 개봉하는 중입니다... 잠시만 기다려주세요.", view=self.view)
+        
+        count = int(self.values[0])
+        rewards, error_msg = open_random_box_multiple(interaction.user.id, count)
+        
+        if error_msg:
+            return await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
+            
+        update_quest_progress(interaction.user.id, "open_box", count)
+        
+        await interaction.edit_original_response(content="📦 흔들흔들... 상자들이 일제히 빛나기 시작합니다! 💫", view=None)
+        await asyncio.sleep(0.5)
+        await interaction.edit_original_response(content="✨ 눈부신 빛의 기둥과 함께 모든 보상이 쏟아져 나옵니다! ✨")
+        await asyncio.sleep(0.5)
+        
+        desc_parts = [f"축하합니다! 상자 {count}개에서 다음 보상들을 획득했습니다:\n"]
+        if rewards["coins"] > 0:
+            desc_parts.append(f"* 💰 **재화 {rewards['coins']:,} 코인**")
+        if rewards["booster_days"] > 0:
+            desc_parts.append(f"* 💎 **XP 부스터 {rewards['booster_days']}일권**")
+        if rewards["premium_boxes"] > 0:
+            desc_parts.append(f"* 🎁 **프리미엄 랜덤 상자 {rewards['premium_boxes']}개**")
+        if rewards["jackpot_boxes"] > 0:
+            desc_parts.append(f"* 👑 **잭팟 상자 {rewards['jackpot_boxes']}개**")
+            
+        if len(desc_parts) == 1:
+            desc_parts.append("* 꽝 (보상이 없습니다)")
+            
+        embed = discord.Embed(
+            title="📦 랜덤 상자 일괄 개봉 완료",
+            description="\n".join(desc_parts),
+            color=0x9b59b6
+        )
+        await interaction.edit_original_response(content=None, embed=embed)
+
+class BoxOpenSelectView(discord.ui.View):
+    def __init__(self, box_count: int):
+        super().__init__(timeout=60)
+        self.add_item(BoxOpenSelect(box_count))
+
+
+# =========================
 # 버튼 View (시즌 패스 및 상점)
 # =========================
 class PassPanelView(discord.ui.View):
@@ -1188,26 +1348,18 @@ class PassPanelView(discord.ui.View):
 
     @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random")
     async def open_random(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not use_item(interaction.user.id, "random_box"):
+        row = get_user(interaction.user.id)
+        random_box = row[2] if row else 0
+        
+        if random_box <= 0:
             return await interaction.response.send_message("❌ 보유한 랜덤 상자가 없습니다.", ephemeral=True)
             
-        update_quest_progress(interaction.user.id, "open_box", 1)
-        
-        await interaction.response.send_message("📦 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="📦 흔들흔들... 상자가 빛나기 시작합니다! 💫")
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
-        await asyncio.sleep(0.5)
-        
-        result = open_random_box(interaction.user.id)
-        
-        embed = discord.Embed(
-            title="📦 랜덤 상자 개봉 완료",
-            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
-            color=0x9b59b6
+        view = BoxOpenSelectView(random_box)
+        await interaction.response.send_message(
+            f"📦 **랜덤 상자 개봉**\n개봉할 상자 개수를 선택해주세요. (보유 중: `{random_box}`개)",
+            view=view,
+            ephemeral=True
         )
-        await interaction.edit_original_response(content=None, embed=embed)
 
     @discord.ui.button(label="프리미엄 상자 열기", emoji="🎁", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_premium")
     async def open_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
