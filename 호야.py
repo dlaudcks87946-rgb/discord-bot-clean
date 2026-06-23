@@ -12,6 +12,7 @@ import psycopg2
 import time
 import datetime
 import random
+import re
 
 # Railway 프로젝트에서 데이터베이스 영구 보존을 위해 PostgreSQL 서비스를 추가한 후,
 # 봇 서비스의 Variables 탭에서 DATABASE_URL 변수를 추가하고 값으로 ${{Postgres.DATABASE_URL}} 을 연결해 주어야 이 환경변수를 인식합니다.
@@ -1917,6 +1918,38 @@ async def on_message(message):
         if has_nickname and has_game and has_time and has_intro:
             member = message.author
             if isinstance(member, discord.Member):
+                # [닉네임변경] 닉네임 자동 파싱 및 변경 기능 (현재 주석 처리됨. 필요 시 활성화 가능)
+                # nickname = None
+                # for line in content.split("\n"):
+                #     line_stripped = "".join(line.split())
+                #     if "닉네임/나이" in line_stripped or "닉넴/나이" in line_stripped:
+                #         parts = line.split(":", 1)
+                #         if len(parts) < 2:
+                #             parts = line.split("-", 1)
+                #         if len(parts) >= 2:
+                #             value_part = parts[1].strip()
+                #             # 패턴 1: 슬래시(/) 구분 (예: 오퍼 / 90, 너구리/95)
+                #             match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?$', value_part)
+                #             if match1:
+                #                 nickname = match1.group(1).strip()
+                #             else:
+                #                 # 패턴 2: 공백 구분 (예: 희얼 03)
+                #                 match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?$', value_part)
+                #                 if match2:
+                #                     nickname = match2.group(1).strip()
+                #         break
+                # 
+                # nick_changed = False
+                # if nickname:
+                #     try:
+                #         await member.edit(nick=nickname)
+                #         print(f"✅ 닉네임 자동 변경 완료: {member.name} -> {nickname}")
+                #         nick_changed = True
+                #     except discord.Forbidden:
+                #         print(f"❌ 권한 부족: {member.name}의 닉네임을 {nickname}(으)로 변경할 수 없습니다.")
+                #     except Exception as e:
+                #         print(f"❌ 닉네임 변경 오류: {e}")
+
                 # 제거할 역할 (ID: 1369712767631626313)
                 target_role_id = 1369712767631626313
                 role_to_remove = message.guild.get_role(target_role_id)
@@ -1946,6 +1979,9 @@ async def on_message(message):
                             await member.remove_roles(role_to_remove)
                             await message.add_reaction("✅")
                             # 안내 메시지 전송 후 5초 뒤 자동 삭제
+                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화 시 아래 코드 주석 해제 및 기존 msg 줄 주석 처리)
+                            # extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
+                            # msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
                             msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.", mention_author=False)
                             await asyncio.sleep(5)
                             await msg.delete()
@@ -1957,6 +1993,9 @@ async def on_message(message):
                         # 이미 역할이 없는 경우에도 확인 리액션은 달아줌
                         await message.add_reaction("✅")
                         if grant_success and role_to_grant:
+                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화 시 아래 코드 주석 해제 및 기존 msg 줄 주석 처리)
+                            # extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
+                            # msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
                             msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.", mention_author=False)
                             await asyncio.sleep(5)
                             await msg.delete()
