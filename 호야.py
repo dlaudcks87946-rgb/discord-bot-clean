@@ -585,15 +585,15 @@ def open_random_box(user_id: int):
         p = "%s" if DATABASE_URL else "?"
         now = int(time.time())
         
-        if roll <= 40:
+        if roll <= 45:
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (500, user_id))
+            result = "💰 재화 500 획득!"
+        elif roll <= 70:
             cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (1000, user_id))
             result = "💰 재화 1,000 획득!"
-        elif roll <= 65:
-            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (2500, user_id))
-            result = "💰 재화 2,500 획득!"
         elif roll <= 80:
-            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (5000, user_id))
-            result = "💰 재화 5,000 획득!"
+            cursor.execute(f"UPDATE users SET coin = coin + {p} WHERE user_id={p}", (1500, user_id))
+            result = "💰 재화 1,500 획득!"
         elif roll <= 90:
             cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
             row = cursor.fetchone()
@@ -648,15 +648,15 @@ def open_random_box_multiple(user_id: int, count: int):
         
         for _ in range(count):
             roll = random.randint(1, 100)
-            if roll <= 40:
+            if roll <= 45:
+                added_coins += 500
+                rewards_summary["coins"] += 500
+            elif roll <= 70:
                 added_coins += 1000
                 rewards_summary["coins"] += 1000
-            elif roll <= 65:
-                added_coins += 2500
-                rewards_summary["coins"] += 2500
             elif roll <= 80:
-                added_coins += 5000
-                rewards_summary["coins"] += 5000
+                added_coins += 1500
+                rewards_summary["coins"] += 1500
             elif roll <= 90:
                 added_booster_seconds += 86400
                 rewards_summary["booster_days"] += 1
@@ -1043,9 +1043,9 @@ def box_info_embed():
     embed.add_field(
         name="📦 랜덤 상자",
         value=(
-            "40% → 💰 재화 1,000\n"
-            "25% → 💰 재화 2,500\n"
-            "15% → 💰 재화 5,000\n"
+            "45% → 💰 재화 500\n"
+            "25% → 💰 재화 1,000\n"
+            "10% → 💰 재화 1,500\n"
             "10% → 💎 XP 부스터 1일\n"
             "7% → 🎁 프리미엄 랜덤 상자\n"
             "3% → 👑 잭팟 상자"
