@@ -524,7 +524,7 @@ def add_xp(user_id: int, amount: int):
         return []
 
 # 상점 구매 비즈니스 로직
-def buy_shop_item(user_id: int, item_type: str, cost: int):
+def buy_shop_item(user_id: int, item_type: str, cost: int, count: int = 1):
     ensure_user(user_id)
     try:
         conn = get_db_connection()
@@ -538,28 +538,29 @@ def buy_shop_item(user_id: int, item_type: str, cost: int):
             return False, "유저 정보를 찾을 수 없습니다."
         
         coins, booster_until = row
-        if coins < cost:
+        total_cost = cost * count
+        if coins < total_cost:
             cursor.close()
             conn.close()
-            return False, f"❌ 재화가 부족합니다. (보유: {coins:,} / 필요: {cost:,})"
+            return False, f"❌ 재화가 부족합니다. (보유: {coins:,} / 필요: {total_cost:,})"
         
-        cursor.execute(f"UPDATE users SET coin = coin - {p} WHERE user_id={p}", (cost, user_id))
+        cursor.execute(f"UPDATE users SET coin = coin - {p} WHERE user_id={p}", (total_cost, user_id))
         
         now = int(time.time())
         if item_type == "random_box":
-            cursor.execute(f"UPDATE users SET random_box = random_box + 1 WHERE user_id={p}", (user_id,))
-            msg = "📦 랜덤 상자 1개를 구매했습니다!"
+            cursor.execute(f"UPDATE users SET random_box = random_box + {p} WHERE user_id={p}", (count, user_id))
+            msg = f"📦 랜덤 상자 {count}개를 구매했습니다!"
         elif item_type == "premium_box":
-            cursor.execute(f"UPDATE users SET premium_box = premium_box + 1 WHERE user_id={p}", (user_id,))
-            msg = "🎁 프리미엄 랜덤 상자 1개를 구매했습니다!"
+            cursor.execute(f"UPDATE users SET premium_box = premium_box + {p} WHERE user_id={p}", (count, user_id))
+            msg = f"🎁 프리미엄 랜덤 상자 {count}개를 구매했습니다!"
         elif item_type == "booster_1d":
-            new_booster = max(booster_until, now) + 86400
+            new_booster = max(booster_until, now) + count * 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
-            msg = "💎 XP 부스터 1일을 구매했습니다!"
+            msg = f"💎 XP 부스터 1일 {count}개를 구매했습니다!"
         elif item_type == "booster_7d":
-            new_booster = max(booster_until, now) + 7 * 86400
+            new_booster = max(booster_until, now) + count * 7 * 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
-            msg = "💎 XP 부스터 7일을 구매했습니다!"
+            msg = f"💎 XP 부스터 7일 {count}개를 구매했습니다!"
         else:
             cursor.close()
             conn.close()
@@ -568,7 +569,7 @@ def buy_shop_item(user_id: int, item_type: str, cost: int):
         conn.commit()
         cursor.close()
         conn.close()
-        update_quest_progress(user_id, "buy_shop", 1)
+        update_quest_progress(user_id, "buy_shop", count)
         return True, msg
     except Exception as e:
         print(f"❌ buy_shop_item 오류: {e}")
@@ -1417,29 +1418,72 @@ class PassPanelView(discord.ui.View):
                 print(f"❌ 기프티콘 당첨 알림 전송 실패: {e}")
 
 
+# =========================
+# 상점 일괄 구매를 위한 Select Menu 및 View
+# =========================
+class ShopBuySelect(discord.ui.Select):
+    def __init__(self, item_type: str, base_cost: int, item_name: str):
+        self.item_type = item_type
+        self.base_cost = base_cost
+        self.item_name = item_name
+        
+        options = []
+        for i in range(1, 11):
+            total_cost = base_cost * i
+            options.append(discord.SelectOption(
+                label=f"{i}개",
+                value=str(i),
+                description=f"구매 비용: {total_cost:,} 재화"
+            ))
+            
+        super().__init__(
+            placeholder=f"구매할 {item_name}의 개수를 선택하세요...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        self.disabled = True
+        await interaction.response.edit_message(content="🪙 구매를 처리하는 중입니다...", view=self.view)
+        
+        count = int(self.values[0])
+        success, msg = buy_shop_item(interaction.user.id, self.item_type, self.base_cost, count)
+        
+        if success:
+            await interaction.edit_original_response(content=f"✅ {msg}", view=None)
+        else:
+            await interaction.edit_original_response(content=f"❌ {msg}", view=None)
+
+class ShopBuySelectView(discord.ui.View):
+    def __init__(self, item_type: str, base_cost: int, item_name: str):
+        super().__init__(timeout=60)
+        self.add_item(ShopBuySelect(item_type, base_cost, item_name))
+
+
 class ShopPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="📦 랜덤 상자 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_random")
     async def buy_random(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "random_box", 2000)
-        await interaction.response.send_message(msg, ephemeral=True)
+        view = ShopBuySelectView("random_box", 2000, "📦 랜덤 상자")
+        await interaction.response.send_message("구매할 개수를 선택해주세요.", view=view, ephemeral=True)
 
     @discord.ui.button(label="💎 부스터 1일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_1d")
     async def buy_booster_1d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_1d", 1000)
-        await interaction.response.send_message(msg, ephemeral=True)
+        view = ShopBuySelectView("booster_1d", 1000, "💎 부스터 1일")
+        await interaction.response.send_message("구매할 개수를 선택해주세요.", view=view, ephemeral=True)
 
     @discord.ui.button(label="💎 부스터 7일 구매", style=discord.ButtonStyle.success, custom_id="heaven_shop:buy_booster_7d")
     async def buy_booster_7d(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "booster_7d", 5000)
-        await interaction.response.send_message(msg, ephemeral=True)
+        view = ShopBuySelectView("booster_7d", 5000, "💎 부스터 7일")
+        await interaction.response.send_message("구매할 개수를 선택해주세요.", view=view, ephemeral=True)
 
     @discord.ui.button(label="🎁 프리미엄 상자 구매", style=discord.ButtonStyle.danger, custom_id="heaven_shop:buy_premium")
     async def buy_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
-        success, msg = buy_shop_item(interaction.user.id, "premium_box", 8000)
-        await interaction.response.send_message(msg, ephemeral=True)
+        view = ShopBuySelectView("premium_box", 8000, "🎁 프리미엄 상자")
+        await interaction.response.send_message("구매할 개수를 선택해주세요.", view=view, ephemeral=True)
 
 def get_seconds_until_next_reset():
     now = datetime.datetime.now()
