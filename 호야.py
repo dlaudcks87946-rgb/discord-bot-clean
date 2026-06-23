@@ -626,7 +626,7 @@ def open_random_box_multiple(user_id: int, count: int):
         # Check current random boxes
         cursor.execute(f"SELECT random_box, coin, premium_box, jackpot_box, booster_until FROM users WHERE user_id={p}", (user_id,))
         row = cursor.fetchone()
-        if not row or row[2] < count:  # random_box is the 3rd column (index 2) in the SELECT list: random_box, coin, premium_box, jackpot_box, booster_until
+        if not row or row[0] < count:  # random_box is the 1st column (index 0) in the SELECT list: random_box, coin, premium_box, jackpot_box, booster_until
             cursor.close()
             conn.close()
             return None, "보유한 랜덤 상자가 부족합니다."
