@@ -601,12 +601,9 @@ def open_random_box(user_id: int):
             new_booster = max(curr_booster, now) + 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
             result = "💎 XP 부스터 1일 획득!"
-        elif roll <= 97:
+        else:
             cursor.execute(f"UPDATE users SET premium_box = premium_box + 1 WHERE user_id={p}", (user_id,))
             result = "🎁 프리미엄 랜덤 상자 1개 획득!"
-        else:
-            cursor.execute(f"UPDATE users SET jackpot_box = jackpot_box + 1 WHERE user_id={p}", (user_id,))
-            result = "👑 잭팟 상자 1개 획득!"
             
         conn.commit()
         cursor.close()
@@ -660,12 +657,9 @@ def open_random_box_multiple(user_id: int, count: int):
             elif roll <= 90:
                 added_booster_seconds += 86400
                 rewards_summary["booster_days"] += 1
-            elif roll <= 97:
+            else:
                 added_premium_boxes += 1
                 rewards_summary["premium_boxes"] += 1
-            else:
-                added_jackpot_boxes += 1
-                rewards_summary["jackpot_boxes"] += 1
                 
         new_booster = max(curr_booster, now) + added_booster_seconds
         
@@ -712,16 +706,16 @@ def open_premium_box(user_id: int):
             cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
             row = cursor.fetchone()
             curr_booster = row[0] if row else 0
-            new_booster = max(curr_booster, now) + 7 * 86400
+            new_booster = max(curr_booster, now) + 3 * 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
-            result = "💎 XP 부스터 7일 획득!"
+            result = "💎 XP 부스터 3일 획득!"
         elif roll <= 97:
             cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
             row = cursor.fetchone()
             curr_booster = row[0] if row else 0
-            new_booster = max(curr_booster, now) + 30 * 86400
+            new_booster = max(curr_booster, now) + 15 * 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
-            result = "💎 XP 부스터 30일 획득!"
+            result = "💎 XP 부스터 15일 획득!"
         else:
             cursor.execute(f"UPDATE users SET jackpot_box = jackpot_box + 1 WHERE user_id={p}", (user_id,))
             result = "👑 잭팟 상자 1개 획득!"
@@ -753,9 +747,9 @@ def open_jackpot_box(user_id: int):
             cursor.execute(f"SELECT booster_until FROM users WHERE user_id={p}", (user_id,))
             row = cursor.fetchone()
             curr_booster = row[0] if row else 0
-            new_booster = max(curr_booster, now) + 90 * 86400
+            new_booster = max(curr_booster, now) + 30 * 86400
             cursor.execute(f"UPDATE users SET booster_until = {p} WHERE user_id={p}", (new_booster, user_id))
-            result = "💎 XP 부스터 90일 획득!"
+            result = "💎 XP 부스터 30일 획득!"
         else:
             result = "🎁 기프티콘 획득! (관리자에게 문의해주세요.)"
             
@@ -810,11 +804,11 @@ def open_premium_box_multiple(user_id: int, count: int):
                 added_coins += 7500
                 rewards_summary["coins"] += 7500
             elif roll <= 90:
-                added_booster_seconds += 7 * 86400
-                rewards_summary["booster_days"] += 7
+                added_booster_seconds += 3 * 86400
+                rewards_summary["booster_days"] += 3
             elif roll <= 97:
-                added_booster_seconds += 30 * 86400
-                rewards_summary["booster_days"] += 30
+                added_booster_seconds += 15 * 86400
+                rewards_summary["booster_days"] += 15
             else:
                 added_jackpot_boxes += 1
                 rewards_summary["jackpot_boxes"] += 1
@@ -882,8 +876,8 @@ def open_jackpot_box_multiple(user_id: int, count: int):
                 added_premium_boxes += 5
                 rewards_summary["premium_boxes"] += 5
             elif roll <= 95:
-                added_booster_seconds += 90 * 86400
-                rewards_summary["booster_days"] += 90
+                added_booster_seconds += 30 * 86400
+                rewards_summary["booster_days"] += 30
             else:
                 gifticon_count += 1
                 rewards_summary["gifticons"] += 1
@@ -1047,8 +1041,7 @@ def box_info_embed():
             "25% → 💰 재화 1,000\n"
             "10% → 💰 재화 1,500\n"
             "10% → 💎 XP 부스터 1일\n"
-            "7% → 🎁 프리미엄 랜덤 상자\n"
-            "3% → 👑 잭팟 상자"
+            "10% → 🎁 프리미엄 랜덤 상자"
         ),
         inline=False
     )
@@ -1058,8 +1051,8 @@ def box_info_embed():
             "40% → 💰 재화 5,000\n"
             "25% → 📦 랜덤 상자 10개\n"
             "15% → 💰 재화 7,500\n"
-            "10% → 💎 XP 부스터 7일\n"
-            "7% → 💎 XP 부스터 30일\n"
+            "10% → 💎 XP 부스터 3일\n"
+            "7% → 💎 XP 부스터 15일\n"
             "3% → 👑 잭팟 상자"
         ),
         inline=False
@@ -1069,7 +1062,7 @@ def box_info_embed():
         value=(
             "50% → 💰 재화 10,000\n"
             "30% → 🎁 프리미엄 랜덤 상자 5개\n"
-            "15% → 💎 XP 부스터 90일\n"
+            "15% → 💎 XP 부스터 30일\n"
             "5% → 🎁 기프티콘"
         ),
         inline=False
@@ -1725,13 +1718,6 @@ async def voice_xp_loop():
             xp_to_add = 10 if is_booster_active else 5
             coin_to_add = 20  # 분당 20 코인 기본 지급
             
-            # 누적 음성 60분 도달 시마다 보너스 50 XP 및 500 코인 추가 지급
-            new_voice_mins = old_voice_mins + 1
-            if new_voice_mins > 0 and new_voice_mins % 60 == 0:
-                xp_to_add += 50
-                coin_to_add += 500
-                print(f"🎁 [시즌패스] {uid}님 누적 음성 {new_voice_mins}분 달성 보너스 50 XP & 500 코인 지급!")
-                
             new_xp = old_xp + xp_to_add
             
             cursor.execute(
@@ -1867,8 +1853,7 @@ async def create_pass_panel(interaction: discord.Interaction):
         description=(
             "음성 채널에 참여하여 패스 레벨을 올리고 풍성한 보상을 획득하세요!\n\n"
             "**💡 획득 방식**\n"
-            "🎤 **음성 채널 참여:** 1분당 **5 XP** (부스터 적용 시 **10 XP**) & 💰 **20 코인** 지급\n"
-            "🎁 **누적 참여 보너스:** 60분마다 **+50 XP** & 💰 **+500 코인** 추가 지급\n\n"
+            "🎤 **음성 채널 참여:** 1분당 **5 XP** (부스터 적용 시 **10 XP**) & 💰 **20 코인** 지급\n\n"
             "📦 아래 버튼을 눌러 내 시즌 패스 정보를 확인하거나 상점을 이용하실 수 있습니다."
         ),
         color=0x9b59b6
