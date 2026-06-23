@@ -767,6 +767,150 @@ def open_jackpot_box(user_id: int):
         print(f"❌ open_jackpot_box 오류: {e}")
         return "상자를 여는 도중 오류가 발생했습니다."
 
+
+def open_premium_box_multiple(user_id: int, count: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        # Check current premium boxes
+        cursor.execute(f"SELECT premium_box, coin, random_box, jackpot_box, booster_until FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[0] < count:
+            cursor.close()
+            conn.close()
+            return None, "보유한 프리미엄 랜덤 상자가 부족합니다."
+            
+        curr_premium_box, curr_coin, curr_random_box, curr_jackpot, curr_booster = row
+        
+        added_coins = 0
+        added_random_boxes = 0
+        added_booster_seconds = 0
+        added_jackpot_boxes = 0
+        
+        rewards_summary = {
+            "coins": 0,
+            "random_boxes": 0,
+            "booster_days": 0,
+            "jackpot_boxes": 0
+        }
+        
+        for _ in range(count):
+            roll = random.randint(1, 100)
+            if roll <= 40:
+                added_coins += 5000
+                rewards_summary["coins"] += 5000
+            elif roll <= 65:
+                added_random_boxes += 10
+                rewards_summary["random_boxes"] += 10
+            elif roll <= 80:
+                added_coins += 7500
+                rewards_summary["coins"] += 7500
+            elif roll <= 90:
+                added_booster_seconds += 7 * 86400
+                rewards_summary["booster_days"] += 7
+            elif roll <= 97:
+                added_booster_seconds += 30 * 86400
+                rewards_summary["booster_days"] += 30
+            else:
+                added_jackpot_boxes += 1
+                rewards_summary["jackpot_boxes"] += 1
+                
+        new_booster = max(curr_booster, now) + added_booster_seconds
+        
+        cursor.execute(
+            f"""
+            UPDATE users 
+            SET premium_box = premium_box - {p},
+                coin = coin + {p},
+                random_box = random_box + {p},
+                jackpot_box = jackpot_box + {p},
+                booster_until = {p}
+            WHERE user_id = {p}
+            """,
+            (count, added_coins, added_random_boxes, added_jackpot_boxes, new_booster, user_id)
+        )
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return rewards_summary, None
+    except Exception as e:
+        print(f"❌ open_premium_box_multiple 오류: {e}")
+        return None, "상자를 여는 도중 오류가 발생했습니다."
+
+
+def open_jackpot_box_multiple(user_id: int, count: int):
+    ensure_user(user_id)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        now = int(time.time())
+        
+        # Check current jackpot boxes
+        cursor.execute(f"SELECT jackpot_box, coin, premium_box, booster_until FROM users WHERE user_id={p}", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[0] < count:
+            cursor.close()
+            conn.close()
+            return None, "보유한 잭팟 상자가 부족합니다."
+            
+        curr_jackpot_box, curr_coin, curr_premium_box, curr_booster = row
+        
+        added_coins = 0
+        added_premium_boxes = 0
+        added_booster_seconds = 0
+        gifticon_count = 0
+        
+        rewards_summary = {
+            "coins": 0,
+            "premium_boxes": 0,
+            "booster_days": 0,
+            "gifticons": 0
+        }
+        
+        for _ in range(count):
+            roll = random.randint(1, 100)
+            if roll <= 50:
+                added_coins += 10000
+                rewards_summary["coins"] += 10000
+            elif roll <= 80:
+                added_premium_boxes += 5
+                rewards_summary["premium_boxes"] += 5
+            elif roll <= 95:
+                added_booster_seconds += 90 * 86400
+                rewards_summary["booster_days"] += 90
+            else:
+                gifticon_count += 1
+                rewards_summary["gifticons"] += 1
+                
+        new_booster = max(curr_booster, now) + added_booster_seconds
+        
+        cursor.execute(
+            f"""
+            UPDATE users 
+            SET jackpot_box = jackpot_box - {p},
+                coin = coin + {p},
+                premium_box = premium_box + {p},
+                booster_until = {p}
+            WHERE user_id = {p}
+            """,
+            (count, added_coins, added_premium_boxes, new_booster, user_id)
+        )
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return rewards_summary, None
+    except Exception as e:
+        print(f"❌ open_jackpot_box_multiple 오류: {e}")
+        return None, "상자를 여는 도중 오류가 발생했습니다."
+
+
 # 임베드 생성 함수들
 def pass_embed(member: discord.Member):
     xp, coin, random_box, premium_box, jackpot_box, booster_until, voice_minutes = get_user(member.id)
@@ -1189,15 +1333,28 @@ class VoiceUsagePanel(discord.ui.View):
 # 상자 일괄 개봉을 위한 Select Menu 및 View
 # =========================
 class BoxOpenSelect(discord.ui.Select):
-    def __init__(self, box_count: int):
+    def __init__(self, box_count: int, box_type: str):
+        self.box_type = box_type  # "random", "premium", "jackpot"
+        
+        # Determine emoji and labels based on box type
+        if box_type == "random":
+            emoji = "📦"
+            label_text = "랜덤 상자"
+        elif box_type == "premium":
+            emoji = "🎁"
+            label_text = "프리미엄 상자"
+        else:
+            emoji = "👑"
+            label_text = "잭팟 상자"
+            
         options = []
         if box_count <= 25:
             for i in range(1, box_count + 1):
                 options.append(discord.SelectOption(
                     label=f"{i}개",
                     value=str(i),
-                    emoji="📦",
-                    description=f"랜덤 상자 {i}개를 엽니다."
+                    emoji=emoji,
+                    description=f"{label_text} {i}개를 엽니다."
                 ))
         else:
             standard_options = [1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 150, 200, 250, 300, 400, 500]
@@ -1207,8 +1364,8 @@ class BoxOpenSelect(discord.ui.Select):
                 options.append(discord.SelectOption(
                     label=f"{val}개",
                     value=str(val),
-                    emoji="📦",
-                    description=f"랜덤 상자 {val}개를 엽니다."
+                    emoji=emoji,
+                    description=f"{label_text} {val}개를 엽니다."
                 ))
                 
             if len(options) >= 25:
@@ -1230,45 +1387,87 @@ class BoxOpenSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         self.disabled = True
-        await interaction.response.edit_message(content="📦 상자를 개봉하는 중입니다... 잠시만 기다려주세요.", view=self.view)
+        
+        emoji_open = "📦" if self.box_type == "random" else ("🎁" if self.box_type == "premium" else "👑")
+        await interaction.response.edit_message(content=f"{emoji_open} 상자를 개봉하는 중입니다... 잠시만 기다려주세요.", view=self.view)
         
         count = int(self.values[0])
-        rewards, error_msg = open_random_box_multiple(interaction.user.id, count)
         
+        if self.box_type == "random":
+            rewards, error_msg = open_random_box_multiple(interaction.user.id, count)
+            box_name = "랜덤 상자"
+            embed_color = 0x9b59b6
+        elif self.box_type == "premium":
+            rewards, error_msg = open_premium_box_multiple(interaction.user.id, count)
+            box_name = "프리미엄 랜덤 상자"
+            embed_color = 0xe74c3c
+        else:
+            rewards, error_msg = open_jackpot_box_multiple(interaction.user.id, count)
+            box_name = "잭팟 상자"
+            embed_color = 0xf1c40f
+            
         if error_msg:
             return await interaction.followup.send(f"❌ {error_msg}", ephemeral=True)
             
         update_quest_progress(interaction.user.id, "open_box", count)
         
-        await interaction.edit_original_response(content="📦 흔들흔들... 상자들이 일제히 빛나기 시작합니다! 💫", view=None)
+        await interaction.edit_original_response(content=f"{emoji_open} 흔들흔들... 상자들이 일제히 빛나기 시작합니다! 💫", view=None)
         await asyncio.sleep(0.5)
         await interaction.edit_original_response(content="✨ 눈부신 빛의 기둥과 함께 모든 보상이 쏟아져 나옵니다! ✨")
         await asyncio.sleep(0.5)
         
         desc_parts = [f"축하합니다! 상자 {count}개에서 다음 보상들을 획득했습니다:\n"]
-        if rewards["coins"] > 0:
-            desc_parts.append(f"* 💰 **재화 {rewards['coins']:,} 코인**")
-        if rewards["booster_days"] > 0:
-            desc_parts.append(f"* 💎 **XP 부스터 {rewards['booster_days']}일권**")
-        if rewards["premium_boxes"] > 0:
-            desc_parts.append(f"* 🎁 **프리미엄 랜덤 상자 {rewards['premium_boxes']}개**")
-        if rewards["jackpot_boxes"] > 0:
-            desc_parts.append(f"* 👑 **잭팟 상자 {rewards['jackpot_boxes']}개**")
-            
+        
+        if self.box_type == "random":
+            if rewards["coins"] > 0:
+                desc_parts.append(f"* 💰 **재화 {rewards['coins']:,} 코인**")
+            if rewards["booster_days"] > 0:
+                desc_parts.append(f"* 💎 **XP 부스터 {rewards['booster_days']}일권**")
+            if rewards["premium_boxes"] > 0:
+                desc_parts.append(f"* 🎁 **프리미엄 랜덤 상자 {rewards['premium_boxes']}개**")
+            if rewards["jackpot_boxes"] > 0:
+                desc_parts.append(f"* 👑 **잭팟 상자 {rewards['jackpot_boxes']}개**")
+        elif self.box_type == "premium":
+            if rewards["coins"] > 0:
+                desc_parts.append(f"* 💰 **재화 {rewards['coins']:,} 코인**")
+            if rewards["random_boxes"] > 0:
+                desc_parts.append(f"* 📦 **랜덤 상자 {rewards['random_boxes']}개**")
+            if rewards["booster_days"] > 0:
+                desc_parts.append(f"* 💎 **XP 부스터 {rewards['booster_days']}일권**")
+            if rewards["jackpot_boxes"] > 0:
+                desc_parts.append(f"* 👑 **잭팟 상자 {rewards['jackpot_boxes']}개**")
+        else: # jackpot
+            if rewards["coins"] > 0:
+                desc_parts.append(f"* 💰 **재화 {rewards['coins']:,} 코인**")
+            if rewards["premium_boxes"] > 0:
+                desc_parts.append(f"* 🎁 **프리미엄 랜덤 상자 {rewards['premium_boxes']}개**")
+            if rewards["booster_days"] > 0:
+                desc_parts.append(f"* 💎 **XP 부스터 {rewards['booster_days']}일권**")
+            if rewards["gifticons"] > 0:
+                desc_parts.append(f"* 🎁 **기프티콘 {rewards['gifticons']}개 (관리자에게 문의해주세요.)**")
+                # Send gifticon notification to admin channel
+                channel_id = 1518304536136253674
+                try:
+                    channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
+                    if channel:
+                        await channel.send(f"🎉 **[기프티콘 당첨]** {interaction.user.mention}님이 잭팟 상자 일괄 개봉({count}개) 중 **기프티콘 {rewards['gifticons']}개**에 당첨되었습니다! (관리자분들은 확인 후 기프티콘을 지급해 주세요.)")
+                except Exception as e:
+                    print(f"❌ 기프티콘 당첨 알림 전송 실패: {e}")
+                    
         if len(desc_parts) == 1:
             desc_parts.append("* 꽝 (보상이 없습니다)")
             
         embed = discord.Embed(
-            title="📦 랜덤 상자 일괄 개봉 완료",
+            title=f"{emoji_open} {box_name} 일괄 개봉 완료",
             description="\n".join(desc_parts),
-            color=0x9b59b6
+            color=embed_color
         )
         await interaction.edit_original_response(content=None, embed=embed)
 
 class BoxOpenSelectView(discord.ui.View):
-    def __init__(self, box_count: int):
+    def __init__(self, box_count: int, box_type: str):
         super().__init__(timeout=60)
-        self.add_item(BoxOpenSelect(box_count))
+        self.add_item(BoxOpenSelect(box_count, box_type))
 
 
 # =========================
@@ -1278,14 +1477,14 @@ class PassPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="내 패스 보기", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="heaven_pass:my_pass")
+    @discord.ui.button(label="내 패스 보기", emoji="🎫", style=discord.ButtonStyle.primary, custom_id="heaven_pass:my_pass", row=0)
     async def my_pass(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             embed=pass_embed(interaction.user),
             ephemeral=True
         )
 
-    @discord.ui.button(label="상점 보기", emoji="🛒", style=discord.ButtonStyle.success, custom_id="heaven_pass:shop")
+    @discord.ui.button(label="상점 보기", emoji="🛒", style=discord.ButtonStyle.success, custom_id="heaven_pass:shop", row=0)
     async def shop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             embed=shop_embed(),
@@ -1293,21 +1492,7 @@ class PassPanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="상자 확률", emoji="📋", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:box_info")
-    async def box_info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=box_info_embed(),
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="전체 보상", emoji="🎁", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:all_rewards")
-    async def all_rewards(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=rewards_info_embed(),
-            ephemeral=True
-        )
-
-    @discord.ui.button(label="랭킹 보기", emoji="🏆", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:ranking")
+    @discord.ui.button(label="랭킹 보기", emoji="🏆", style=discord.ButtonStyle.primary, custom_id="heaven_pass:ranking", row=0)
     async def ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
         rows = get_season_pass_rankings()
         if not rows:
@@ -1339,7 +1524,7 @@ class PassPanelView(discord.ui.View):
             embed.description = "\n".join(desc_lines)
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @discord.ui.button(label="일일 퀘스트", emoji="📋", style=discord.ButtonStyle.primary, custom_id="heaven_pass:quests")
+    @discord.ui.button(label="일일 퀘스트", emoji="📋", style=discord.ButtonStyle.success, custom_id="heaven_pass:quests", row=0)
     async def quests(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
             embed=quest_embed(interaction.user.id),
@@ -1347,7 +1532,7 @@ class PassPanelView(discord.ui.View):
             ephemeral=True
         )
 
-    @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random")
+    @discord.ui.button(label="랜덤 상자 열기", emoji="📦", style=discord.ButtonStyle.secondary, custom_id="heaven_pass:open_random", row=1)
     async def open_random(self, interaction: discord.Interaction, button: discord.ui.Button):
         row = get_user(interaction.user.id)
         random_box = row[2] if row else 0
@@ -1355,67 +1540,42 @@ class PassPanelView(discord.ui.View):
         if random_box <= 0:
             return await interaction.response.send_message("❌ 보유한 랜덤 상자가 없습니다.", ephemeral=True)
             
-        view = BoxOpenSelectView(random_box)
+        view = BoxOpenSelectView(random_box, "random")
         await interaction.response.send_message(
             f"📦 **랜덤 상자 개봉**\n개봉할 상자 개수를 선택해주세요. (보유 중: `{random_box}`개)",
             view=view,
             ephemeral=True
         )
 
-    @discord.ui.button(label="프리미엄 상자 열기", emoji="🎁", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_premium")
+    @discord.ui.button(label="프리미엄 상자 열기", emoji="🎁", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_premium", row=1)
     async def open_premium(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not use_item(interaction.user.id, "premium_box"):
+        row = get_user(interaction.user.id)
+        premium_box = row[3] if row else 0
+        
+        if premium_box <= 0:
             return await interaction.response.send_message("❌ 보유한 프리미엄 랜덤 상자가 없습니다.", ephemeral=True)
             
-        update_quest_progress(interaction.user.id, "open_box", 1)
-        
-        await interaction.response.send_message("🎁 프리미엄 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="🎁 흔들흔들... 상자가 빛나기 시작합니다! 💫")
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
-        await asyncio.sleep(0.5)
-        
-        result = open_premium_box(interaction.user.id)
-        
-        embed = discord.Embed(
-            title="🎁 프리미엄 랜덤 상자 개봉 완료",
-            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
-            color=0xe74c3c
+        view = BoxOpenSelectView(premium_box, "premium")
+        await interaction.response.send_message(
+            f"🎁 **프리미엄 상자 개봉**\n개봉할 상자 개수를 선택해주세요. (보유 중: `{premium_box}`개)",
+            view=view,
+            ephemeral=True
         )
-        await interaction.edit_original_response(content=None, embed=embed)
 
-    @discord.ui.button(label="잭팟 상자 열기", emoji="👑", style=discord.ButtonStyle.danger, custom_id="heaven_pass:open_jackpot")
+    @discord.ui.button(label="잭팟 상자 열기", emoji="👑", style=discord.ButtonStyle.primary, custom_id="heaven_pass:open_jackpot", row=1)
     async def open_jackpot(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not use_item(interaction.user.id, "jackpot_box"):
+        row = get_user(interaction.user.id)
+        jackpot_box = row[4] if row else 0
+        
+        if jackpot_box <= 0:
             return await interaction.response.send_message("❌ 보유한 잭팟 상자가 없습니다.", ephemeral=True)
             
-        update_quest_progress(interaction.user.id, "open_box", 1)
-        
-        await interaction.response.send_message("👑 잭팟 상자를 조심스럽게 여는 중... 🔍", ephemeral=True)
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="👑 흔들흔들... 상자가 빛나기 시작합니다! 💫")
-        await asyncio.sleep(0.5)
-        await interaction.edit_original_response(content="✨ 눈부신 빛과 함께 보상이 튀어나옵니다! ✨")
-        await asyncio.sleep(0.5)
-        
-        result = open_jackpot_box(interaction.user.id)
-        
-        embed = discord.Embed(
-            title="👑 잭팟 상자 개봉 완료",
-            description=f"축하합니다! 상자에서 다음 보상이 나왔습니다:\n\n* **{result}**",
-            color=0xf1c40f
+        view = BoxOpenSelectView(jackpot_box, "jackpot")
+        await interaction.response.send_message(
+            f"👑 **잭팟 상자 개봉**\n개봉할 상자 개수를 선택해주세요. (보유 중: `{jackpot_box}`개)",
+            view=view,
+            ephemeral=True
         )
-        await interaction.edit_original_response(content=None, embed=embed)
-        
-        if "기프티콘" in result:
-            channel_id = 1518304536136253674
-            try:
-                channel = bot.get_channel(channel_id) or await bot.fetch_channel(channel_id)
-                if channel:
-                    await channel.send(f"🎉 **[기프티콘 당첨]** {interaction.user.mention}님이 잭팟 상자에서 **기프티콘**에 당첨되었습니다! (관리자분들은 확인 후 기프티콘을 지급해 주세요.)")
-            except Exception as e:
-                print(f"❌ 기프티콘 당첨 알림 전송 실패: {e}")
 
 
 # =========================
