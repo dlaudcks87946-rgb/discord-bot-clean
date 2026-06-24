@@ -2204,23 +2204,21 @@ async def on_member_update(before, after):
             except Exception as e:
                 print(f"❌ 접두사 제거 중 오류 발생: {e}")
 
-    # 2. 역할 ID 1348342303416127612를 획득하면 레벨 접두사([LV숫자]) 제거
+    # 2. 역할 ID 1348342303416127612를 획득하면 [LV0] 접두사 제거
     clean_role_id = 1348342303416127612
     before_has_clean_role = any(r.id == clean_role_id for r in before.roles)
     after_has_clean_role = any(r.id == clean_role_id for r in after.roles)
     
     if not before_has_clean_role and after_has_clean_role:
-        if after.nick:
-            match = re.match(r'^\[LV\d+\]\s*', after.nick, re.IGNORECASE)
-            if match:
-                new_nick = re.sub(r'^\[LV\d+\]\s*', '', after.nick, flags=re.IGNORECASE)
-                try:
-                    await after.edit(nick=new_nick)
-                    print(f"✅ 역할 획득 감지: {after.name}의 닉네임에서 레벨 접두사 제거 완료 -> {new_nick}")
-                except discord.Forbidden:
-                    print(f"❌ 권한 부족: {after.name}의 닉네임에서 접두사를 제거할 수 없습니다.")
-                except Exception as e:
-                    print(f"❌ 접두사 제거 중 오류 발생: {e}")
+        if after.nick and after.nick.startswith("[LV0] "):
+            new_nick = after.nick[6:] # "[LV0] " 부분 제거
+            try:
+                await after.edit(nick=new_nick)
+                print(f"✅ 역할 획득 감지: {after.name}의 닉네임에서 [LV0] 제거 완료 -> {new_nick}")
+            except discord.Forbidden:
+                print(f"❌ 권한 부족: {after.name}의 닉네임에서 접두사를 제거할 수 없습니다.")
+            except Exception as e:
+                print(f"❌ 접두사 제거 중 오류 발생: {e}")
 
 # Run Flask server and start Discord bot
 keep_alive()
