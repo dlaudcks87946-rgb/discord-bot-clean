@@ -1958,9 +1958,6 @@ async def on_message(message):
                         await msg.delete()
                         return
 
-                    # 고정 레벨 접두사 [LV0] 적용
-                    nickname = f"[LV0] {nickname}"
-
                     try:
                         await member.edit(nick=nickname)
                         print(f"✅ 닉네임 자동 변경 완료: {member.name} -> {nickname}")
