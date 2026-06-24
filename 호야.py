@@ -1958,6 +1958,14 @@ async def on_message(message):
                         await msg.delete()
                         return
 
+                    # 현재 별명에서 대괄호([]) 및 내부 텍스트 패턴 추출하여 접두사로 유지
+                    current_nick = member.nick
+                    if current_nick:
+                        match = re.match(r'^(\[.*?\])\s*', current_nick)
+                        if match:
+                            prefix = match.group(1)
+                            nickname = f"{prefix} {nickname}"
+
                     try:
                         await member.edit(nick=nickname)
                         print(f"✅ 닉네임 자동 변경 완료: {member.name} -> {nickname}")
