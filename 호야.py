@@ -1918,40 +1918,55 @@ async def on_message(message):
         if has_nickname and has_game and has_time and has_intro:
             member = message.author
             if isinstance(member, discord.Member):
-                # [닉네임변경] 닉네임 자동 파싱 및 변경 기능 (현재 주석 처리됨. 필요 시 활성화 가능)
-                # nickname = None
-                # for line in content.split("\n"):
-                #     line_stripped = "".join(line.split())
-                #     if "닉네임/나이" in line_stripped or "닉넴/나이" in line_stripped:
-                #         parts = line.split(":", 1)
-                #         if len(parts) < 2:
-                #             parts = line.split("-", 1)
-                #         if len(parts) >= 2:
-                #             value_part = parts[1].strip()
-                #             # 패턴 1: 슬래시(/) 구분 (예: 오퍼 / 90, 너구리/95)
-                #             match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?$', value_part)
-                #             if match1:
-                #                 nickname = match1.group(1).strip()
-                #             else:
-                #                 # 패턴 2: 공백 구분 (예: 희얼 03)
-                #                 match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?$', value_part)
-                #                 if match2:
-                #                     nickname = match2.group(1).strip()
-                #         break
-                # 
-                # nick_changed = False
-                # if nickname:
-                #     try:
-                #         await member.edit(nick=nickname)
-                #         print(f"✅ 닉네임 자동 변경 완료: {member.name} -> {nickname}")
-                #         nick_changed = True
-                #     except discord.Forbidden:
-                #         print(f"❌ 권한 부족: {member.name}의 닉네임을 {nickname}(으)로 변경할 수 없습니다.")
-                #     except Exception as e:
-                #         print(f"❌ 닉네임 변경 오류: {e}")
-
                 # 제거할 역할 (ID: 1369712767631626313)
                 target_role_id = 1369712767631626313
+
+                # [닉네임변경] 닉네임 자동 파싱 및 변경 기능 (활성화됨 - 특정 역할 보유자만)
+                nickname = None
+                nick_changed = False
+                
+                # 대상 역할(제거할 역할)을 가지고 있는 경우에만 닉네임 변경 진행
+                if any(r.id == target_role_id for r in member.roles):
+                    for line in content.split("\n"):
+                        line_stripped = "".join(line.split())
+                        if "닉네임/나이" in line_stripped or "닉넴/나이" in line_stripped:
+                            parts = line.split(":", 1)
+                            if len(parts) < 2:
+                                parts = line.split("-", 1)
+                            if len(parts) >= 2:
+                                value_part = parts[1].strip()
+                                # 패턴 1: 슬래시(/) 구분 (예: 오퍼 / 90, 너구리/95)
+                                match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?$', value_part)
+                                if match1:
+                                    nickname = match1.group(1).strip()
+                                else:
+                                    # 패턴 2: 공백 구분 (예: 희얼 03)
+                                    match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?$', value_part)
+                                    if match2:
+                                        nickname = match2.group(1).strip()
+                            break
+                    
+                    if nickname is None:
+                        # 닉네임 파싱 실패 시 역할 지급 중단 및 안내 메시지 전송 후 종료
+                        await message.add_reaction("❌")
+                        msg = await message.reply(
+                            "❌ 닉네임/나이 양식이 올바르지 않습니다.\n"
+                            "양식(예: `닉네임/나이: 홍길동 / 20` 또는 `닉네임/나이: 홍길동 20`)에 맞추어 정확히 다시 작성해 주세요.",
+                            mention_author=False
+                        )
+                        await asyncio.sleep(5)
+                        await msg.delete()
+                        return
+
+                    try:
+                        await member.edit(nick=nickname)
+                        print(f"✅ 닉네임 자동 변경 완료: {member.name} -> {nickname}")
+                        nick_changed = True
+                    except discord.Forbidden:
+                        print(f"❌ 권한 부족: {member.name}의 닉네임을 {nickname}(으)로 변경할 수 없습니다.")
+                    except Exception as e:
+                        print(f"❌ 닉네임 변경 오류: {e}")
+
                 role_to_remove = message.guild.get_role(target_role_id)
                 
                 # 부여할 역할 (ID: 1497939431473287238)
@@ -1979,10 +1994,9 @@ async def on_message(message):
                             await member.remove_roles(role_to_remove)
                             await message.add_reaction("✅")
                             # 안내 메시지 전송 후 5초 뒤 자동 삭제
-                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화 시 아래 코드 주석 해제 및 기존 msg 줄 주석 처리)
-                            # extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
-                            # msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
-                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.", mention_author=False)
+                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화됨)
+                            extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
+                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_remove.name}** 역할이 제거되고 **{role_to_grant.name if role_to_grant else '새로운'}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
                             await asyncio.sleep(5)
                             await msg.delete()
                         except discord.Forbidden:
@@ -1993,10 +2007,9 @@ async def on_message(message):
                         # 이미 역할이 없는 경우에도 확인 리액션은 달아줌
                         await message.add_reaction("✅")
                         if grant_success and role_to_grant:
-                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화 시 아래 코드 주석 해제 및 기존 msg 줄 주석 처리)
-                            # extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
-                            # msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
-                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.", mention_author=False)
+                            # [닉네임변경] 닉네임 변경 알림 포함 메시지 (활성화됨)
+                            extra_msg = f" 아울러 닉네임이 **{nickname}**(으)로 변경되었습니다." if nick_changed else ""
+                            msg = await message.reply(f"✅ 양식 작성이 확인되어 **{role_to_grant.name}** 역할이 부여되었습니다.{extra_msg}", mention_author=False)
                             await asyncio.sleep(5)
                             await msg.delete()
                 else:
