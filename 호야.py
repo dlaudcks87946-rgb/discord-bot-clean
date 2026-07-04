@@ -1927,21 +1927,34 @@ async def on_message(message):
                 
                 # 대상 역할(제거할 역할)을 가지고 있는 경우에만 닉네임 변경 진행
                 if any(r.id == target_role_id for r in member.roles):
-                    for line in content.split("\n"):
+                    lines = content.split("\n")
+                    for i, line in enumerate(lines):
                         line_stripped = "".join(line.split())
                         if "닉네임/나이" in line_stripped or "닉넴/나이" in line_stripped:
                             parts = line.split(":", 1)
                             if len(parts) < 2:
                                 parts = line.split("-", 1)
+                            
+                            value_part = ""
                             if len(parts) >= 2:
                                 value_part = parts[1].strip()
+                            
+                            # 콜론/대시 뒤가 비어있다면, 다음 줄 중 비어있지 않은 첫 번째 줄을 탐색
+                            if not value_part:
+                                for j in range(i + 1, len(lines)):
+                                    next_line = lines[j].strip()
+                                    if next_line:
+                                        value_part = next_line
+                                        break
+                                        
+                            if value_part:
                                 # 패턴 1: 슬래시(/) 구분 (예: 오퍼 / 90, 너구리/95)
-                                match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?$', value_part)
+                                match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?(?:\D.*)?$', value_part)
                                 if match1:
                                     nickname = match1.group(1).strip()
                                 else:
                                     # 패턴 2: 공백 구분 (예: 희얼 03)
-                                    match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?$', value_part)
+                                    match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?(?:\D.*)?$', value_part)
                                     if match2:
                                         nickname = match2.group(1).strip()
                             break
