@@ -4,6 +4,8 @@ from discord.ext import commands, tasks
 from discord import app_commands
 import os
 import sys
+import urllib.request
+import json
 from flask import Flask
 from threading import Thread
 import asyncio
@@ -89,7 +91,31 @@ def init_db():
         PRIMARY KEY (user_id, quest_id, quest_date)
     )
     """)
-    
+
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS lotto_tickets (
+        id {"SERIAL" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"},
+        user_id {user_id_type},
+        round_no INTEGER,
+        numbers TEXT,
+        channel_id {user_id_type},
+        is_checked INTEGER DEFAULT 0,
+        match_count INTEGER DEFAULT 0,
+        has_bonus INTEGER DEFAULT 0,
+        prize_rank INTEGER DEFAULT 0,
+        created_at TEXT
+    )
+    """)
+
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS lotto_results (
+        round_no INTEGER PRIMARY KEY,
+        numbers TEXT,
+        bonus INTEGER,
+        drawn_at TEXT
+    )
+    """)
+
     # SQLite 마이그레이션 확인 (PostgreSQL에서는 신규 테이블이므로 패스)
     if not DATABASE_URL:
         try:
@@ -115,6 +141,590 @@ def init_db():
 
 # DB 초기화 실행
 init_db()
+
+
+# ==========================================
+# [로또 시스템 헬퍼 함수 및 클래스]
+# ==========================================
+
+def get_kst_now():
+    # 서버 타임존에 무관하게 항상 한국 시간(KST, UTC+9) 반환
+    utc_now = datetime.datetime.utcnow()
+    return utc_now + datetime.timedelta(hours=9)
+
+def get_current_lotto_round():
+    # 1회차 추첨일: 2002년 12월 7일 20:45 (토요일)
+    first_round_time = datetime.datetime(2002, 12, 7, 20, 45)
+    now = get_kst_now()
+    delta = now - first_round_time
+    weeks = delta.days // 7
+    return weeks + 2
+
+def fetch_lotto_result_sync(round_no):
+    url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={round_no}"
+    try:
+        req = urllib.request.Request(
+            url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            data = json.loads(response.read().decode('utf-8'))
+            if data.get("returnValue") == "success":
+                return {
+                    "round_no": round_no,
+                    "numbers": f"{data['drwtNo1']},{data['drwtNo2']},{data['drwtNo3']},{data['drwtNo4']},{data['drwtNo5']},{data['drwtNo6']}",
+                    "bonus": data["bnusNo"],
+                    "drawn_at": data["drwNoDate"]
+                }
+    except Exception as e:
+        print(f"❌ [로또] {round_no}회차 데이터 가져오기 실패: {e}")
+    return None
+
+async def fetch_lotto_result_async(round_no):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fetch_lotto_result_sync, round_no)
+
+async def sync_historical_lotto_data():
+    print("🔄 [로또] 최근 100회차 당첨 정보 캐싱 시작...")
+    try:
+        current_round = get_current_lotto_round()
+        start_round = max(1, current_round - 100)
+        end_round = current_round - 1
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT round_no FROM lotto_results WHERE round_no >= {p}", (start_round,))
+        cached_rounds = {row[0] for row in cursor.fetchall()}
+        
+        missing_rounds = [r for r in range(start_round, end_round + 1) if r not in cached_rounds]
+        
+        if missing_rounds:
+            print(f"🔄 [로또] 누락된 {len(missing_rounds)}개 회차 데이터 수집 중...")
+            for r in missing_rounds:
+                result = await fetch_lotto_result_async(r)
+                if result:
+                    cursor.execute(
+                        f"INSERT INTO lotto_results (round_no, numbers, bonus, drawn_at) VALUES ({p}, {p}, {p}, {p})",
+                        (result["round_no"], result["numbers"], result["bonus"], result["drawn_at"])
+                    )
+                    conn.commit()
+                    await asyncio.sleep(0.1)
+            print("✅ [로또] 누락된 당첨 정보 캐싱 완료!")
+        else:
+            print("✅ [로또] 이미 최신 당첨 정보가 캐싱되어 있습니다.")
+            
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ [로또] 과거 데이터 캐싱 중 오류 발생: {e}")
+
+def get_lotto_stats_from_db():
+    frequencies = {i: 0 for i in range(1, 46)}
+    last_seen_round = {i: 0 for i in range(1, 46)}
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        current_round = get_current_lotto_round()
+        start_round = max(1, current_round - 100)
+        
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(
+            f"SELECT round_no, numbers FROM lotto_results WHERE round_no >= {p} ORDER BY round_no ASC",
+            (start_round,)
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        actual_count = len(rows)
+        for round_no, numbers_str in rows:
+            nums = [int(n) for n in numbers_str.split(",")]
+            for n in nums:
+                if n in frequencies:
+                    frequencies[n] += 1
+                    last_seen_round[n] = max(last_seen_round[n], round_no)
+        
+        return frequencies, last_seen_round, actual_count
+    except Exception as e:
+        print(f"❌ [로또] 통계 데이터 계산 중 오류: {e}")
+        return frequencies, last_seen_round, 0
+
+def is_balanced_lotto(nums):
+    total_sum = sum(nums)
+    if not (100 <= total_sum <= 180):
+        return False
+    
+    odds = sum(1 for n in nums if n % 2 != 0)
+    if odds not in [2, 3, 4]:
+        return False
+        
+    lows = sum(1 for n in nums if n <= 22)
+    if lows not in [2, 3, 4]:
+        return False
+        
+    return True
+
+def has_consecutive(nums):
+    for i in range(len(nums) - 1):
+        if nums[i+1] - nums[i] == 1:
+            return True
+    return False
+
+def generate_lotto_game(fixed_nums, excluded_nums, pattern):
+    available_pool = [n for n in range(1, 46) if n not in excluded_nums and n not in fixed_nums]
+    needed_count = 6 - len(fixed_nums)
+    
+    if needed_count < 0 or len(available_pool) < needed_count:
+        return None
+        
+    for _ in range(1000):
+        selected = random.sample(available_pool, needed_count)
+        game = sorted(list(fixed_nums) + selected)
+        
+        if pattern == "balanced":
+            if is_balanced_lotto(game):
+                return game
+        elif pattern == "no_consecutive":
+            if not has_consecutive(game):
+                return game
+        elif pattern == "odd_heavy":
+            odds = sum(1 for n in game if n % 2 != 0)
+            if odds >= 4:
+                return game
+        elif pattern == "even_heavy":
+            evens = sum(1 for n in game if n % 2 == 0)
+            if evens >= 4:
+                return game
+        elif pattern == "high_heavy":
+            highs = sum(1 for n in game if n >= 23)
+            if highs >= 4:
+                return game
+        elif pattern == "low_heavy":
+            lows = sum(1 for n in game if n <= 22)
+            if lows >= 4:
+                return game
+        else:
+            return game
+            
+    # 조건 만족 실패 시 무작위 생성
+    selected = random.sample(available_pool, needed_count)
+    return sorted(list(fixed_nums) + selected)
+
+def parse_number_list(num_str):
+    if not num_str:
+        return set(), None
+    tokens = re.split(r'[\s,]+', num_str.strip())
+    numbers = set()
+    for tok in tokens:
+        if not tok:
+            continue
+        try:
+            val = int(tok)
+            if not (1 <= val <= 45):
+                return set(), f"번호는 1에서 45 사이여야 합니다: `{tok}`"
+            if val in numbers:
+                return set(), f"중복된 번호가 있습니다: `{tok}`"
+            numbers.add(val)
+        except ValueError:
+            return set(), f"올바른 숫자가 아닙니다: `{tok}`"
+    return numbers, None
+
+
+class LottoFilterSelect(discord.ui.Select):
+    def __init__(self, current_filter):
+        options = [
+            discord.SelectOption(label="기본 균형형", value="balanced", description="총합, 홀짝, 고저 비율이 고루 분배된 균형 조합", emoji="⚖️"),
+            discord.SelectOption(label="연속수 배제형", value="no_consecutive", description="연속되는 숫자가 없는 조합", emoji="🚫"),
+            discord.SelectOption(label="홀수 강조형", value="odd_heavy", description="홀수가 4개 이상 포함된 조합", emoji="🔴"),
+            discord.SelectOption(label="짝수 강조형", value="even_heavy", description="짝수가 4개 이상 포함된 조합", emoji="🔵"),
+            discord.SelectOption(label="고수 강조형", value="high_heavy", description="23~45 사이 숫자가 4개 이상 포함된 조합", emoji="🟢"),
+            discord.SelectOption(label="소수 강조형", value="low_heavy", description="1~22 사이 숫자가 4개 이상 포함된 조합", emoji="🟡"),
+            discord.SelectOption(label="순수 무작위형", value="random", description="아무런 규칙이 적용되지 않은 완전 무작위 조합", emoji="🎰")
+        ]
+        for opt in options:
+            if opt.value == current_filter:
+                opt.default = True
+                break
+        super().__init__(placeholder="적용할 AI 패턴 필터를 선택하세요...", min_values=1, max_values=1, options=options, custom_id="lotto_filter_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.view.user_id:
+            await interaction.response.send_message("❌ 이 번호 생성기의 소유자만 필터를 변경할 수 있습니다.", ephemeral=True)
+            return
+            
+        self.view.pattern = self.values[0]
+        self.view.regenerate_numbers()
+        
+        for opt in self.options:
+            opt.default = (opt.value == self.view.pattern)
+            
+        embed = self.view.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self.view)
+
+
+class LottoRecommendView(discord.ui.View):
+    def __init__(self, user_id, count, fixed_nums, excluded_nums, pattern="balanced"):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.count = count
+        self.fixed_nums = fixed_nums
+        self.excluded_nums = excluded_nums
+        self.pattern = pattern
+        self.games = []
+        
+        self.add_item(LottoFilterSelect(self.pattern))
+        self.regenerate_numbers()
+
+    def regenerate_numbers(self):
+        self.games = []
+        for _ in range(self.count):
+            game = generate_lotto_game(self.fixed_nums, self.excluded_nums, self.pattern)
+            if game:
+                self.games.append(game)
+            else:
+                available = [n for n in range(1, 46) if n not in self.excluded_nums and n not in self.fixed_nums]
+                self.games.append(sorted(list(self.fixed_nums) + random.sample(available, 6 - len(self.fixed_nums))))
+
+    def create_embed(self):
+        frequencies, last_seen, actual_count = get_lotto_stats_from_db()
+        current_round = get_current_lotto_round()
+        
+        filter_names = {
+            "balanced": "⚖️ 기본 균형형",
+            "no_consecutive": "🚫 연속수 배제형",
+            "odd_heavy": "🔴 홀수 강조형",
+            "even_heavy": "🔵 짝수 강조형",
+            "high_heavy": "🟢 고수 강조형",
+            "low_heavy": "🟡 소수 강조형",
+            "random": "🎰 순수 무작위형"
+        }
+        
+        embed = discord.Embed(
+            title="🎰 HEAVEN AI 로또 연구소",
+            description=(
+                f"원하는 패턴 필터를 적용하여 추천 번호를 생성해 보세요!\n"
+                f"**💾 번호 저장**을 누르면 추첨일(매주 토요일 저녁 8시 45분) 결과 발표 후 **자동으로 당첨 여부를 정산해 DM/채널로 알림**을 보내드립니다!\n\n"
+                f"ℹ️ **현재 적용된 AI 필터:** `{filter_names[self.pattern]}`\n"
+                f"ℹ️ **다음 추첨 회차:** `제 {current_round}회차 대비`"
+            ),
+            color=0xFF007F
+        )
+        
+        def get_emoji(num):
+            if 1 <= num <= 10: return "🟡"
+            elif 11 <= num <= 20: return "🔵"
+            elif 21 <= num <= 30: return "🔴"
+            elif 31 <= num <= 40: return "⚫"
+            else: return "🟢"
+
+        if self.count == 1:
+            game = self.games[0]
+            formatted_numbers = "  ".join([f"{get_emoji(num)} `{num:02d}`" for num in game])
+            embed.add_field(name="🎫 추천 번호 조합", value=formatted_numbers, inline=False)
+            
+            total_sum = sum(game)
+            odds = sum(1 for n in game if n % 2 != 0)
+            evens = 6 - odds
+            lows = sum(1 for n in game if n <= 22)
+            highs = 6 - lows
+            
+            diffs = set()
+            for i in range(len(game)):
+                for j in range(i + 1, len(game)):
+                    diffs.add(game[j] - game[i])
+            ac_val = len(diffs) - (6 - 1)
+            
+            consec_pairs = []
+            for i in range(len(game) - 1):
+                if game[i+1] - game[i] == 1:
+                    consec_pairs.append(f"({game[i]}, {game[i+1]})")
+            consec_text = ", ".join(consec_pairs) if consec_pairs else "없음"
+            
+            freq_details = []
+            cold_details = []
+            for num in game:
+                freq = frequencies.get(num, 0)
+                last_rd = last_seen.get(num, 0)
+                cold_weeks = current_round - last_rd if last_rd > 0 else 100
+                cold_text = f"{cold_weeks}주" if cold_weeks < 100 else "100주+"
+                
+                freq_details.append(f"`{num:02d}`({freq}회)")
+                cold_details.append(f"`{num:02d}`({cold_text})")
+            
+            avg_freq = sum(frequencies.get(num, 0) for num in game) / 6
+            avg_cold = sum((current_round - last_seen.get(num, 0)) if last_seen.get(num, 0) > 0 else 100 for num in game) / 6
+            
+            analysis_text = (
+                f"▪️ **총합:** `{total_sum}` {'(균형: 100~180)' if 100 <= total_sum <= 180 else '(비균형)'}\n"
+                f"▪️ **홀짝 비율:** `{odds}:{evens}`\n"
+                f"▪️ **고저 비율:** `{lows}:{highs}` (Low: 1~22, High: 23~45)\n"
+                f"▪️ **산술 복잡도 (AC값):** `{ac_val}` (5 이상 권장)\n"
+                f"▪️ **연속 번호 쌍:** `{consec_text}`\n"
+                f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (최근 100회차 기준)\n"
+                f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주`"
+            )
+            embed.add_field(name="📊 실시간 패턴 및 통계 분석", value=analysis_text, inline=False)
+            
+            detail_stat_text = (
+                f"▪️ **번호별 출현 빈도:** {', '.join(freq_details)}\n"
+                f"▪️ **번호별 미출현 기간:** {', '.join(cold_details)}"
+            )
+            embed.add_field(name="🔍 최근 100회차 심층 통계", value=detail_stat_text, inline=False)
+            
+        else:
+            game_list_text = []
+            for i, game in enumerate(self.games, 1):
+                formatted_numbers = " ".join([f"{get_emoji(num)} `{num:02d}`" for num in game])
+                
+                total_sum = sum(game)
+                odds = sum(1 for n in game if n % 2 != 0)
+                evens = 6 - odds
+                lows = sum(1 for n in game if n <= 22)
+                highs = 6 - lows
+                
+                mini_stat = f"└ `합:{total_sum:03d} | 홀짝 {odds}:{evens} | 고저 {lows}:{highs}`"
+                game_list_text.append(f"**🎫 {i:02d}번째 게임**\n{formatted_numbers}\n{mini_stat}")
+                
+            chunk_size = 5
+            for idx in range(0, len(game_list_text), chunk_size):
+                chunk = game_list_text[idx:idx+chunk_size]
+                embed.add_field(
+                    name=f"📋 추천 조합 목록 ({idx+1}~{min(self.count, idx+chunk_size)}번째)",
+                    value="\n".join(chunk),
+                    inline=False
+                )
+                
+            all_sums = [sum(g) for g in self.games]
+            avg_sum = sum(all_sums) / len(self.games)
+            embed.set_footer(text=f"전체 {self.count}개 게임 평균 총합: {avg_sum:.1f} | 추첨 당첨 보장 없음")
+
+        rule_texts = []
+        if self.fixed_nums:
+            rule_texts.append(f"고정수: `{' '.join(f'{n:02d}' for n in sorted(list(self.fixed_nums)))}`")
+        if self.excluded_nums:
+            rule_texts.append(f"제외수: `{' '.join(f'{n:02d}' for n in sorted(list(self.excluded_nums)))}`")
+        if rule_texts:
+            embed.add_field(name="⚙️ 커스텀 규칙 적용", value=" | ".join(rule_texts), inline=False)
+            
+        return embed
+
+    @discord.ui.button(label="재생성 (Re-roll)", style=discord.ButtonStyle.secondary, emoji="🔄", custom_id="lotto_reroll_btn", row=1)
+    async def reroll(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 이 번호 생성기의 소유자만 조작할 수 있습니다.", ephemeral=True)
+            return
+            
+        self.regenerate_numbers()
+        
+        # 다시 저장할 수 있도록 저장 버튼 리셋
+        for child in self.children:
+            if getattr(child, "custom_id", None) == "lotto_save_btn":
+                child.disabled = False
+                child.label = "번호 저장 (Save)"
+                child.style = discord.ButtonStyle.success
+                break
+                
+        embed = self.create_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="번호 저장 (Save)", style=discord.ButtonStyle.success, emoji="💾", custom_id="lotto_save_btn", row=1)
+    async def save_tickets(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ 이 번호 생성기의 소유자만 번호를 저장할 수 있습니다.", ephemeral=True)
+            return
+            
+        current_round = get_current_lotto_round()
+        now_str = get_kst_now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            p = "%s" if DATABASE_URL else "?"
+            
+            for game in self.games:
+                nums_str = ",".join(str(n) for n in game)
+                cursor.execute(
+                    f"INSERT INTO lotto_tickets (user_id, round_no, numbers, channel_id, is_checked, match_count, has_bonus, prize_rank, created_at) VALUES ({p}, {p}, {p}, {p}, 0, 0, 0, 0, {p})",
+                    (interaction.user.id, current_round, nums_str, interaction.channel_id, now_str)
+                )
+            conn.commit()
+            cursor.close()
+            conn.close()
+            
+            button.disabled = True
+            button.label = "저장 완료 (Saved)"
+            button.style = discord.ButtonStyle.secondary
+            
+            await interaction.response.edit_message(view=self)
+            
+            success_embed = discord.Embed(
+                title="💾 로또 번호 저장 완료!",
+                description=(
+                    f"✅ **총 {len(self.games)}개 게임**이 성공적으로 저장되었습니다.\n"
+                    f"📅 **대상 회차:** 제 {current_round}회차 추첨 대비\n"
+                    f"🔔 **자동 정산:** 추첨이 완료되는 토요일 밤 8시 45분 이후 자동으로 결과를 채널 및 개인 DM으로 알려드립니다."
+                ),
+                color=0x39FF14
+            )
+            await interaction.followup.send(embed=success_embed, ephemeral=True)
+            
+        except Exception as e:
+            print(f"❌ [로또] 번호 저장 중 오류 발생: {e}")
+            await interaction.response.send_message("❌ 번호 저장 중 데이터베이스 오류가 발생했습니다. 다시 시도해 주세요.", ephemeral=True)
+
+
+@tasks.loop(minutes=10.0)
+async def lotto_check_loop():
+    now_kst = get_kst_now()
+    # 토요일 (weekday 5) 이고, 20:45 ~ 21:30 KST 사이일 때 결과 조회 시도
+    if now_kst.weekday() == 5 and (20, 45) <= (now_kst.hour, now_kst.minute) <= (21, 30):
+        current_round = get_current_lotto_round()
+        target_round = current_round - 1
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT round_no FROM lotto_results WHERE round_no = {p}", (target_round,))
+        cached = cursor.fetchone()
+        
+        if not cached:
+            print(f"📡 [로또] {target_round}회차 추첨 결과 조회 시도 중...")
+            result = await fetch_lotto_result_async(target_round)
+            if result:
+                cursor.execute(
+                    f"INSERT INTO lotto_results (round_no, numbers, bonus, drawn_at) VALUES ({p}, {p}, {p}, {p})",
+                    (result["round_no"], result["numbers"], result["bonus"], result["drawn_at"])
+                )
+                conn.commit()
+                print(f"✅ [로또] {target_round}회차 당첨 번호 저장 성공: {result['numbers']} + {result['bonus']}")
+                
+                await check_and_notify_lotto_tickets(target_round, result["numbers"], result["bonus"])
+            else:
+                print(f"⚠️ [로또] {target_round}회차 추첨 결과를 아직 가져올 수 없습니다. 10분 후 재시도합니다.")
+        
+        cursor.close()
+        conn.close()
+
+async def check_and_notify_lotto_tickets(round_no, win_numbers_str, bonus):
+    win_nums = set(int(n) for n in win_numbers_str.split(","))
+    
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        
+        cursor.execute(
+            f"SELECT id, user_id, numbers, channel_id FROM lotto_tickets WHERE round_no = {p} AND is_checked = 0",
+            (round_no,)
+        )
+        tickets = cursor.fetchall()
+        
+        if not tickets:
+            cursor.close()
+            conn.close()
+            return
+            
+        print(f"📊 [로또] {round_no}회차 티켓 정산 시작 (대상: {len(tickets)}개)")
+        
+        for ticket_id, user_id, numbers_str, channel_id in tickets:
+            user_nums = [int(n) for n in numbers_str.split(",")]
+            
+            matches = set(user_nums).intersection(win_nums)
+            match_count = len(matches)
+            has_bonus = 1 if bonus in user_nums else 0
+            
+            prize_rank = 0
+            if match_count == 6:
+                prize_rank = 1
+            elif match_count == 5 and has_bonus == 1:
+                prize_rank = 2
+            elif match_count == 5:
+                prize_rank = 3
+            elif match_count == 4:
+                prize_rank = 4
+            elif match_count == 3:
+                prize_rank = 5
+                
+            cursor.execute(
+                f"UPDATE lotto_tickets SET is_checked = 1, match_count = {p}, has_bonus = {p}, prize_rank = {p} WHERE id = {p}",
+                (match_count, has_bonus, prize_rank, ticket_id)
+            )
+            conn.commit()
+            
+            await send_lotto_notification(user_id, round_no, user_nums, win_nums, bonus, match_count, prize_rank, channel_id)
+            
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ [로또] 티켓 정산 처리 중 오류 발생: {e}")
+
+async def send_lotto_notification(user_id, round_no, user_nums, win_nums, bonus, match_count, prize_rank, channel_id):
+    rank_info = {
+        1: ("🥇 1등 (6개 일치)", "당첨금: 동행복권 공식 홈페이지 참조"),
+        2: ("🥈 2등 (5개 + 보너스 일치)", "당첨금: 동행복권 공식 홈페이지 참조"),
+        3: ("🥉 3등 (5개 일치)", "당첨금: 동행복권 공식 홈페이지 참조"),
+        4: ("💎 4등 (4개 일치)", "당첨금: 50,000원"),
+        5: ("🍀 5등 (3개 일치)", "당첨금: 5,000원"),
+        0: ("❌ 낙첨", "다음 기회에 다시 도전해보세요!")
+    }
+    
+    rank_name, prize_desc = rank_info[prize_rank]
+    
+    def get_emoji(num):
+        if 1 <= num <= 10: return "🟡"
+        elif 11 <= num <= 20: return "🔵"
+        elif 21 <= num <= 30: return "🔴"
+        elif 31 <= num <= 40: return "⚫"
+        else: return "🟢"
+        
+    formatted_user_nums = " ".join([f"{get_emoji(n)} `{n:02d}`" for n in user_nums])
+    sorted_win_list = sorted(list(win_nums))
+    formatted_win_nums = " ".join([f"{get_emoji(n)} `{n:02d}`" for n in sorted_win_list]) + f"  ➕  {get_emoji(bonus)} `{bonus:02d}` (보너스)"
+    
+    embed_color = 0x39FF14 if prize_rank > 0 else 0xFF0055
+    
+    embed = discord.Embed(
+        title=f"🎰 제 {round_no}회 로또 추첨 결과 알림",
+        description=f"<@{user_id}> 님이 등록하신 티켓의 정산 결과입니다.",
+        color=embed_color
+    )
+    
+    embed.add_field(name="🗳️ 공식 당첨 번호", value=formatted_win_nums, inline=False)
+    embed.add_field(name="🎫 내 추천 번호", value=formatted_user_nums, inline=False)
+    embed.add_field(name="📊 분석 결과", value=f"**일치 개수:** {match_count}개 일치 (보너스 일치: {'예' if bonus in user_nums else '아니오'})\n**최종 결과: {rank_name}**\n*{prize_desc}*", inline=False)
+    embed.set_footer(text="HEAVEN AI 로또 연구소")
+    
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception:
+            pass
+            
+    if user:
+        try:
+            await user.send(embed=embed)
+        except Exception as e:
+            print(f"❌ [로또] <@{user_id}>에게 개인 DM 전송 실패: {e}")
+            
+    if channel_id:
+        channel = bot.get_channel(channel_id)
+        if not channel:
+            try:
+                channel = await bot.fetch_channel(channel_id)
+            except Exception:
+                pass
+                
+        if channel:
+            try:
+                msg = f"🎉 <@{user_id}> 님 로또 당첨을 축하드립니다! **{rank_name}**" if prize_rank > 0 else f"🍀 <@{user_id}> 님의 로또 정산 결과: **{rank_name}**"
+                await channel.send(msg, embed=embed)
+            except Exception as e:
+                print(f"❌ [로또] 채널({channel_id})에 알림 전송 실패: {e}")
+
 
 # Active voice sessions tracking (user_id -> join_timestamp)
 active_sessions = {}
@@ -1831,6 +2441,12 @@ async def on_ready():
         voice_xp_loop.start()
         print("⏰ 시즌 패스 음성 XP 적립 루프 시작 완료")
 
+    # 6. 로또 과거 당첨 번호 비동기 캐싱 및 정산 루프 시작
+    asyncio.create_task(sync_historical_lotto_data())
+    if not lotto_check_loop.is_running():
+        lotto_check_loop.start()
+        print("⏰ 주간 로또 당첨 결과 자동 정산 루프 시작 완료")
+
     try:
         # 기존에 복사 등록되어 중복 노출을 유발하던 길드 명령어들을 삭제합니다.
         for guild in bot.guilds:
@@ -1891,6 +2507,162 @@ async def give_xp(interaction: discord.Interaction, member: discord.Member, amou
     if rewards:
         msg += f"\n🎁 지급 과정에서 레벨업 보상 획득: {', '.join(rewards)}"
     await interaction.response.send_message(msg, ephemeral=True)
+
+
+@bot.tree.command(name="로또", description="로또 6/45 추천 번호를 생성합니다.")
+@app_commands.describe(
+    수량="생성할 로또 게임 수량 (1~20개, 기본값: 1)",
+    고정수="반드시 포함할 번호 (쉼표 또는 공백 구분, 예: 3,14)",
+    제외수="생성에서 제외할 번호 (쉼표 또는 공백 구분, 예: 4 45)",
+    필터="적용할 AI 패턴 필터 (기본값: 기본 균형형)"
+)
+@app_commands.choices(필터=[
+    app_commands.Choice(name="⚖️ 기본 균형형", value="balanced"),
+    app_commands.Choice(name="🚫 연속수 배제형", value="no_consecutive"),
+    app_commands.Choice(name="🔴 홀수 강조형", value="odd_heavy"),
+    app_commands.Choice(name="🔵 짝수 강조형", value="even_heavy"),
+    app_commands.Choice(name="🟢 고수 강조형", value="high_heavy"),
+    app_commands.Choice(name="🟡 소수 강조형", value="low_heavy"),
+    app_commands.Choice(name="🎰 순수 무작위형", value="random")
+])
+async def lotto_recommend(
+    interaction: discord.Interaction,
+    수량: int = 1,
+    고정수: str = None,
+    제외수: str = None,
+    필터: str = "balanced"
+):
+    # 1. 수량 유효성 검사 (1~20)
+    if 수량 < 1 or 수량 > 20:
+        await interaction.response.send_message("⚠️ 생성할 수량은 1개에서 20개까지만 선택 가능합니다.", ephemeral=True)
+        return
+
+    # 2. 고정수/제외수 파싱 및 검사
+    fixed_nums, fixed_err = parse_number_list(고정수)
+    if fixed_err:
+        await interaction.response.send_message(f"❌ 고정수 입력 오류: {fixed_err}", ephemeral=True)
+        return
+        
+    excluded_nums, excluded_err = parse_number_list(제외수)
+    if excluded_err:
+        await interaction.response.send_message(f"❌ 제외수 입력 오류: {excluded_err}", ephemeral=True)
+        return
+
+    # 3. 고정수와 제외수 중복 및 개수 검사
+    overlap = fixed_nums.intersection(excluded_nums)
+    if overlap:
+        await interaction.response.send_message(
+            f"❌ 오류: 고정수와 제외수에 동시에 지정된 번호가 있습니다: `{' '.join(str(n) for n in overlap)}`",
+            ephemeral=True
+        )
+        return
+        
+    if len(fixed_nums) > 5:
+        await interaction.response.send_message("❌ 고정수는 최대 5개까지만 설정할 수 있습니다.", ephemeral=True)
+        return
+        
+    if len(fixed_nums) + len(excluded_nums) > 40:
+        await interaction.response.send_message("❌ 고정수와 제외수의 총합이 너무 많아 로또 생성 조건을 충족할 수 없습니다.", ephemeral=True)
+        return
+
+    # 4. View 생성 및 Embed 출력
+    view = LottoRecommendView(
+        user_id=interaction.user.id,
+        count=수량,
+        fixed_nums=fixed_nums,
+        excluded_nums=excluded_nums,
+        pattern=필터
+    )
+    
+    embed = view.create_embed()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="로또분석", description="입력한 번호 조합의 최근 100회차 통계 및 분석을 제공합니다.")
+@app_commands.describe(번호="분석할 로또 번호 6개 (쉼표 또는 공백 구분, 예: 3, 14, 25, 36, 42, 45)")
+async def lotto_analyze(interaction: discord.Interaction, 번호: str):
+    nums, err = parse_number_list(번호)
+    if err:
+        await interaction.response.send_message(f"❌ 입력 오류: {err}", ephemeral=True)
+        return
+        
+    if len(nums) != 6:
+        await interaction.response.send_message("❌ 로또 번호는 정확히 6개 입력하셔야 합니다.", ephemeral=True)
+        return
+
+    sorted_nums = sorted(list(nums))
+    frequencies, last_seen, actual_count = get_lotto_stats_from_db()
+    current_round = get_current_lotto_round()
+    
+    def get_emoji(num):
+        if 1 <= num <= 10: return "🟡"
+        elif 11 <= num <= 20: return "🔵"
+        elif 21 <= num <= 30: return "🔴"
+        elif 31 <= num <= 40: return "⚫"
+        else: return "🟢"
+
+    formatted_numbers = "  ".join([f"{get_emoji(num)} `{num:02d}`" for num in sorted_nums])
+    
+    total_sum = sum(sorted_nums)
+    odds = sum(1 for n in sorted_nums if n % 2 != 0)
+    evens = 6 - odds
+    lows = sum(1 for n in sorted_nums if n <= 22)
+    highs = 6 - lows
+    
+    diffs = set()
+    for i in range(len(sorted_nums)):
+        for j in range(i + 1, len(sorted_nums)):
+            diffs.add(sorted_nums[j] - sorted_nums[i])
+    ac_val = len(diffs) - (6 - 1)
+    
+    consec_pairs = []
+    for i in range(len(sorted_nums) - 1):
+        if sorted_nums[i+1] - sorted_nums[i] == 1:
+            consec_pairs.append(f"({sorted_nums[i]}, {sorted_nums[i+1]})")
+    consec_text = ", ".join(consec_pairs) if consec_pairs else "없음"
+    
+    freq_details = []
+    cold_details = []
+    for num in sorted_nums:
+        freq = frequencies.get(num, 0)
+        last_rd = last_seen.get(num, 0)
+        cold_weeks = current_round - last_rd if last_rd > 0 else 100
+        cold_text = f"{cold_weeks}주" if cold_weeks < 100 else "100주+"
+        
+        freq_details.append(f"`{num:02d}`({freq}회)")
+        cold_details.append(f"`{num:02d}`({cold_text})")
+    
+    avg_freq = sum(frequencies.get(num, 0) for num in sorted_nums) / 6
+    avg_cold = sum((current_round - last_seen.get(num, 0)) if last_seen.get(num, 0) > 0 else 100 for num in sorted_nums) / 6
+    
+    embed = discord.Embed(
+        title="🔍 로또 번호 심층 분석 결과",
+        description=f"입력하신 조합의 과거 **최근 100회차** 데이터를 기반으로 분석한 결과입니다.",
+        color=0x00F0FF  # 네온 블루
+    )
+    
+    embed.add_field(name="🎫 분석 대상 번호", value=formatted_numbers, inline=False)
+    
+    analysis_text = (
+        f"▪️ **총합:** `{total_sum}` {'(균형: 100~180)' if 100 <= total_sum <= 180 else '(비균형)'}\n"
+        f"▪️ **홀짝 비율:** `{odds}:{evens}`\n"
+        f"▪️ **고저 비율:** `{lows}:{highs}` (Low: 1~22, High: 23~45)\n"
+        f"▪️ **산술 복잡도 (AC값):** `{ac_val}` (5 이상 권장)\n"
+        f"▪️ **연속 번호 쌍:** `{consec_text}`\n"
+        f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (최근 100회차 기준)\n"
+        f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주`"
+    )
+    embed.add_field(name="📊 패턴 및 종합 통계 분석", value=analysis_text, inline=False)
+    
+    detail_stat_text = (
+        f"▪️ **번호별 출현 빈도:** {', '.join(freq_details)}\n"
+        f"▪️ **번호별 미출현 기간:** {', '.join(cold_details)}"
+    )
+    embed.add_field(name="🔍 번호별 심층 통계 (최근 100회차)", value=detail_stat_text, inline=False)
+    
+    embed.set_footer(text="HEAVEN AI 로또 연구소")
+    
+    await interaction.response.send_message(embed=embed)
 
 
 # 양식 입력 확인 및 역할 제거 이벤트
