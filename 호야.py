@@ -2675,6 +2675,19 @@ async def on_message(message):
     if message.channel.id == 1516049566535909439:
         return
 
+    # "로또" 또는 "!로또" 텍스트 명령어 대응
+    if message.content.strip() == "로또" or message.content.strip() == "!로또":
+        view = LottoRecommendView(
+            user_id=message.author.id,
+            count=1,
+            fixed_nums=set(),
+            excluded_nums=set(),
+            pattern="balanced"
+        )
+        embed = view.create_embed()
+        await message.channel.send(embed=embed, view=view)
+        return
+
     # 지정한 채널 ID 확인
     if message.channel.id == 1497843456960364726:
         content = message.content
