@@ -161,20 +161,29 @@ def get_current_lotto_round():
     return weeks + 2
 
 def fetch_lotto_result_sync(round_no):
-    url = f"https://www.dhlottery.co.kr/common.do?method=getLottoNumber&drwNo={round_no}"
+    timestamp = int(time.time() * 1000)
+    url = f"https://www.dhlottery.co.kr/lt645/selectPstLt645Info.do?srchLtEpsd={round_no}&_={timestamp}"
     try:
         req = urllib.request.Request(
             url, 
-            headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+            headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Referer': 'https://www.dhlottery.co.kr/'
+            }
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             data = json.loads(response.read().decode('utf-8'))
-            if data.get("returnValue") == "success":
+            lst = data.get("data", {}).get("list", [])
+            if lst:
+                item = lst[0]
+                raw_date = str(item.get("ltRflYmd", ""))
+                formatted_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:8]}" if len(raw_date) == 8 else raw_date
+                
                 return {
                     "round_no": round_no,
-                    "numbers": f"{data['drwtNo1']},{data['drwtNo2']},{data['drwtNo3']},{data['drwtNo4']},{data['drwtNo5']},{data['drwtNo6']}",
-                    "bonus": data["bnusNo"],
-                    "drawn_at": data["drwNoDate"]
+                    "numbers": f"{item['tm1WnNo']},{item['tm2WnNo']},{item['tm3WnNo']},{item['tm4WnNo']},{item['tm5WnNo']},{item['tm6WnNo']}",
+                    "bonus": item['bnsWnNo'],
+                    "drawn_at": formatted_date
                 }
     except Exception as e:
         print(f"❌ [로또] {round_no}회차 데이터 가져오기 실패: {e}")
