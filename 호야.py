@@ -148,9 +148,9 @@ init_db()
 # ==========================================
 
 def get_kst_now():
-    # 서버 타임존에 무관하게 항상 한국 시간(KST, UTC+9) 반환
-    utc_now = datetime.datetime.utcnow()
-    return utc_now + datetime.timedelta(hours=9)
+    # 서버 타임존에 무관하게 항상 한국 시간(KST, UTC+9) naive datetime 반환
+    kst_tz = datetime.timezone(datetime.timedelta(hours=9))
+    return datetime.datetime.now(kst_tz).replace(tzinfo=None)
 
 def get_current_lotto_round():
     # 1회차 추첨일: 2002년 12월 7일 20:45 (토요일)
