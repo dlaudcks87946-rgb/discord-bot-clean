@@ -472,8 +472,8 @@ class LottoRecommendView(discord.ui.View):
                 f"▪️ **고저 비율:** `{lows}:{highs}` (Low: 1~22, High: 23~45)\n"
                 f"▪️ **산술 복잡도 (AC값):** `{ac_val}` (5 이상 권장)\n"
                 f"▪️ **연속 번호 쌍:** `{consec_text}`\n"
-                f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (최근 100회차 기준)\n"
-                f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주`"
+                f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (11~15회 권장, 최근 100회 기준)\n"
+                f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주` (6~10주 권장)"
             )
             embed.add_field(name="📊 실시간 패턴 및 통계 분석", value=analysis_text, inline=False)
             
@@ -2658,8 +2658,8 @@ async def lotto_analyze(interaction: discord.Interaction, 번호: str):
         f"▪️ **고저 비율:** `{lows}:{highs}` (Low: 1~22, High: 23~45)\n"
         f"▪️ **산술 복잡도 (AC값):** `{ac_val}` (5 이상 권장)\n"
         f"▪️ **연속 번호 쌍:** `{consec_text}`\n"
-        f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (최근 100회차 기준)\n"
-        f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주`"
+        f"▪️ **평균 출현 빈도:** `{avg_freq:.1f}회` (11~15회 권장, 최근 100회 기준)\n"
+        f"▪️ **평균 미출현 기간:** `{avg_cold:.1f}주` (6~10주 권장)"
     )
     embed.add_field(name="📊 패턴 및 종합 통계 분석", value=analysis_text, inline=False)
     
