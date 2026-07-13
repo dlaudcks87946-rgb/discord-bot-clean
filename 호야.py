@@ -2674,6 +2674,109 @@ async def lotto_analyze(interaction: discord.Interaction, 번호: str):
     await interaction.response.send_message(embed=embed)
 
 
+def get_saved_lotto_tickets_embed(user_id):
+    current_round = get_current_lotto_round()
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    p = "%s" if DATABASE_URL else "?"
+    
+    # 1. Fetch un-drawn tickets (is_checked = 0)
+    cursor.execute(
+        f"SELECT round_no, numbers, created_at FROM lotto_tickets WHERE user_id = {p} AND is_checked = 0 ORDER BY round_no ASC, id ASC",
+        (user_id,)
+    )
+    undrawn_rows = cursor.fetchall()
+    
+    # 2. Fetch drawn tickets (is_checked = 1, limit to 5)
+    cursor.execute(
+        f"SELECT round_no, numbers, match_count, prize_rank, created_at FROM lotto_tickets WHERE user_id = {p} AND is_checked = 1 ORDER BY round_no DESC, id DESC LIMIT 5",
+        (user_id,)
+    )
+    drawn_rows = cursor.fetchall()
+    
+    cursor.close()
+    conn.close()
+    
+    embed = discord.Embed(
+        title="💾 나의 저장된 로또 번호 내역",
+        description="HEAVEN AI 로또 연구소에서 저장한 로또 번호 목록입니다.",
+        color=0xFF007F
+    )
+    
+    def get_emoji(num):
+        if 1 <= num <= 10: return "🟡"
+        elif 11 <= num <= 20: return "🔵"
+        elif 21 <= num <= 30: return "🔴"
+        elif 31 <= num <= 40: return "⚫"
+        else: return "🟢"
+        
+    def format_numbers(nums_str):
+        nums = [int(n) for n in nums_str.split(",")]
+        return " ".join(f"{get_emoji(n)}`{n:02d}`" for n in sorted(nums))
+
+    # Active/Un-drawn tickets field
+    if undrawn_rows:
+        active_by_round = {}
+        for round_no, numbers, created_at in undrawn_rows:
+            active_by_round.setdefault(round_no, []).append((numbers, created_at))
+            
+        for round_no, tickets in active_by_round.items():
+            ticket_texts = []
+            for i, (numbers, created_at) in enumerate(tickets, 1):
+                date_part = created_at.split()[0] if created_at else ""
+                ticket_texts.append(f"`{i:02d}`. {format_numbers(numbers)} `({date_part})`")
+            embed.add_field(
+                name=f"🎟️ 제 {round_no}회차 대기 중 조합 ({len(tickets)}개)",
+                value="\n".join(ticket_texts),
+                inline=False
+            )
+    else:
+        embed.add_field(
+            name="🎟️ 미추첨 대기 중 조합",
+            value="현재 저장된 대기 중인 번호 조합이 없습니다.\n`/로또` 또는 `!로또` 명령어로 번호를 생성하고 저장해보세요!",
+            inline=False
+        )
+        
+    # Drawn tickets field
+    if drawn_rows:
+        drawn_texts = []
+        rank_names = {
+            1: "🥇 1등 당첨",
+            2: "🥈 2등 당첨",
+            3: "🥉 3등 당첨",
+            4: "💎 4등 당첨",
+            5: "🍀 5등 당첨",
+            0: "❌ 낙첨"
+        }
+        for round_no, numbers, match_count, prize_rank, created_at in drawn_rows:
+            rank_text = rank_names.get(prize_rank, "❌ 낙첨")
+            drawn_texts.append(
+                f"**제 {round_no}회차** | {format_numbers(numbers)}\n"
+                f"└ 정산: `{rank_text}` (일치 개수: {match_count}개)"
+            )
+        embed.add_field(
+            name="📊 최근 당첨 정산 내역 (최근 최대 5개)",
+            value="\n\n".join(drawn_texts),
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name="📊 최근 당첨 정산 내역",
+            value="최근 정산된 로또 내역이 없습니다.",
+            inline=False
+        )
+        
+    embed.set_footer(text="HEAVEN AI 로또 연구소")
+    return embed
+
+
+@bot.tree.command(name="로또조회", description="저장된 나의 로또 번호 내역을 조회합니다.")
+async def lotto_lookup(interaction: discord.Interaction):
+    embed = get_saved_lotto_tickets_embed(interaction.user.id)
+    await interaction.response.send_message(embed=embed)
+
+
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.event
 async def on_message(message):
@@ -2695,6 +2798,12 @@ async def on_message(message):
         )
         embed = view.create_embed()
         await message.channel.send(embed=embed, view=view)
+        return
+
+    # "로또조회" 또는 "!로또조회" 또는 "!내로또" 텍스트 명령어 대응
+    if message.content.strip() in ["로또조회", "!로또조회", "내로또", "!내로또"]:
+        embed = get_saved_lotto_tickets_embed(message.author.id)
+        await message.channel.send(embed=embed)
         return
 
     # 지정한 채널 ID 확인
