@@ -719,20 +719,8 @@ async def send_lotto_notification(user_id, round_no, user_nums, win_nums, bonus,
         except Exception as e:
             print(f"❌ [로또] <@{user_id}>에게 개인 DM 전송 실패: {e}")
             
-    if channel_id:
-        channel = bot.get_channel(channel_id)
-        if not channel:
-            try:
-                channel = await bot.fetch_channel(channel_id)
-            except Exception:
-                pass
-                
-        if channel:
-            try:
-                msg = f"🎉 <@{user_id}> 님 로또 당첨을 축하드립니다! **{rank_name}**" if prize_rank > 0 else f"🍀 <@{user_id}> 님의 로또 정산 결과: **{rank_name}**"
-                await channel.send(msg, embed=embed)
-            except Exception as e:
-                print(f"❌ [로또] 채널({channel_id})에 알림 전송 실패: {e}")
+    # 로또 당첨/낙첨 결과는 개인의 사생활 보호를 위해 채널에 전송하지 않고 개인 DM으로만 전송합니다.
+    # (기존 채널 알림 코드는 본인만 볼 수 있도록 제거됨)
 
 
 # Active voice sessions tracking (user_id -> join_timestamp)
@@ -1777,8 +1765,12 @@ class VoiceUsageView(discord.ui.View):
         )
         
         desc_lines = []
-        for idx, (user_id, seconds) in enumerate(self.full_rows, 1):
+        limit_rows = self.full_rows[:50]
+        for idx, (user_id, seconds) in enumerate(limit_rows, 1):
             desc_lines.append(f"{idx}등: <@{user_id}> - {format_time(seconds)}")
+            
+        if len(self.full_rows) > 50:
+            desc_lines.append("\n*상위 50명까지 표시됩니다.*")
             
         embed.description = "\n".join(desc_lines)
         
@@ -2774,7 +2766,7 @@ def get_saved_lotto_tickets_embed(user_id):
 @bot.tree.command(name="로또조회", description="저장된 나의 로또 번호 내역을 조회합니다.")
 async def lotto_lookup(interaction: discord.Interaction):
     embed = get_saved_lotto_tickets_embed(interaction.user.id)
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # 양식 입력 확인 및 역할 제거 이벤트
