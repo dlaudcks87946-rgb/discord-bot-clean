@@ -2929,16 +2929,19 @@ async def split_teams(interaction: discord.Interaction, team_size: int = 5):
         await interaction.response.send_message("❌ 대상 카테고리를 찾을 수 없습니다.", ephemeral=True)
         return
         
-    members = [m for m in hub_channel.members if not m.bot]
-    if not members:
-        await interaction.response.send_message("❌ 대상 대기방 채널에 유저가 없습니다.", ephemeral=True)
+    all_members = [m for m in hub_channel.members if not m.bot]
+    active_members = [m for m in all_members if not m.display_name.startswith("[관전]")]
+    spectator_members = [m for m in all_members if m.display_name.startswith("[관전]")]
+    
+    if not active_members:
+        await interaction.response.send_message("❌ 대상 대기방 채널에 플레이어가 없습니다. (관전자만 있는 경우 팀을 나눌 수 없습니다.)", ephemeral=True)
         return
         
     await interaction.response.defer(ephemeral=True)
     
-    # 섞기 및 분배
-    random.shuffle(members)
-    chunks = [members[i:i + team_size] for i in range(0, len(members), team_size)]
+    # 섞기 및 플레이어 분배
+    random.shuffle(active_members)
+    chunks = [active_members[i:i + team_size] for i in range(0, len(active_members), team_size)]
     
     import string
     created_channels = []
@@ -2968,7 +2971,7 @@ async def split_teams(interaction: discord.Interaction, team_size: int = 5):
             new_channel = await guild.create_voice_channel(name=new_name, category=category)
             created_channels.append(new_channel)
             
-            # 유저 이동
+            # 플레이어 이동
             for member in chunk:
                 try:
                     await member.move_to(new_channel)
@@ -2983,7 +2986,20 @@ async def split_teams(interaction: discord.Interaction, team_size: int = 5):
             await interaction.followup.send(f"❌ 채널 생성 중 오류 발생: {create_err}", ephemeral=True)
             return
 
-    result_msg = f"✅ 총 {len(members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+    # 관전자 이동 처리 (생성된 채널 중 랜덤 배정)
+    if spectator_members and created_channels:
+        for spectator in spectator_members:
+            target_channel = random.choice(created_channels)
+            try:
+                await spectator.move_to(target_channel)
+                success_moves += 1
+            except Exception as move_err:
+                print(f"❌ 관전자 {spectator.name} 이동 실패: {move_err}")
+                failed_moves += 1
+
+    result_msg = f"✅ 플레이어 {len(active_members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+    if spectator_members:
+        result_msg += f"👁️ 관전자 {len(spectator_members)}명도 각 팀 채널에 랜덤하게 배정되었습니다.\n"
     result_msg += f"🔊 생성된 채널: {', '.join([c.name for c in created_channels])}\n"
     result_msg += f"👥 이동 완료: {success_moves}명"
     if failed_moves > 0:
@@ -3054,7 +3070,7 @@ async def on_message(message):
             try:
                 team_size = int(parts[1])
             except ValueError:
-                await message.reply("❌ 팀 인원수는 숫자여야 합니다. (예: `!팀나누기 5`)\", delete_after=5)")
+                await message.reply("❌ 팀 인원수는 숫자여야 합니다. (예: `!팀나누기 5`)", delete_after=5)
                 return
         
         if team_size <= 0:
@@ -3076,13 +3092,16 @@ async def on_message(message):
             await message.reply("❌ 대상 카테고리를 찾을 수 없습니다.", delete_after=5)
             return
             
-        members = [m for m in hub_channel.members if not m.bot]
-        if not members:
-            await message.reply("❌ 대상 대기방 채널에 유저가 없습니다.", delete_after=5)
+        all_members = [m for m in hub_channel.members if not m.bot]
+        active_members = [m for m in all_members if not m.display_name.startswith("[관전]")]
+        spectator_members = [m for m in all_members if m.display_name.startswith("[관전]")]
+        
+        if not active_members:
+            await message.reply("❌ 대상 대기방 채널에 플레이어가 없습니다. (관전자만 있는 경우 팀을 나눌 수 없습니다.)", delete_after=5)
             return
             
-        random.shuffle(members)
-        chunks = [members[i:i + team_size] for i in range(0, len(members), team_size)]
+        random.shuffle(active_members)
+        chunks = [active_members[i:i + team_size] for i in range(0, len(active_members), team_size)]
         
         status_msg = await message.reply("⏳ 팀 분배 및 채널 생성을 시작합니다...")
         
@@ -3121,7 +3140,19 @@ async def on_message(message):
                 await status_msg.edit(content=f"❌ 오류가 발생했습니다: {e}")
                 return
         
-        result_msg = f"✅ 총 {len(members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+        # 관전자 이동 처리 (생성된 채널 중 랜덤 배정)
+        if spectator_members and created_channels:
+            for spectator in spectator_members:
+                target_channel = random.choice(created_channels)
+                try:
+                    await spectator.move_to(target_channel)
+                    success_moves += 1
+                except Exception:
+                    failed_moves += 1
+
+        result_msg = f"✅ 플레이어 {len(active_members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+        if spectator_members:
+            result_msg += f"👁️ 관전자 {len(spectator_members)}명도 각 팀 채널에 랜덤하게 배정되었습니다.\n"
         result_msg += f"🔊 생성된 채널: {', '.join([c.name for c in created_channels])}\n"
         result_msg += f"👥 이동 완료: {success_moves}명"
         if failed_moves > 0:
