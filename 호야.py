@@ -2257,100 +2257,124 @@ class StatusNicknameView(discord.ui.View):
 
     @discord.ui.button(label="관전", style=discord.ButtonStyle.primary, custom_id="status_nick_spectate")
     async def spectate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
-            return
-
-        current_name = member.nick or member.name
-        clean_name = current_name
-        # 기존 접두사 제거
-        prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-        for prefix in prefixes:
-            if clean_name.startswith(prefix):
-                clean_name = clean_name[len(prefix):]
-                break
-        clean_name = clean_name.strip()
-        new_nick = f"[관전] {clean_name}"[:32]
-
         try:
-            await member.edit(nick=new_nick)
-            await interaction.response.send_message(f"✅ 닉네임이 **{new_nick}**(으)로 변경되었습니다.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ 닉네임을 변경할 권한이 없습니다.\n"
-                "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
-                ephemeral=True
-            )
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+            member = interaction.user
+            if not isinstance(member, discord.Member):
+                await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
+                return
+
+            current_name = member.nick or member.name
+            clean_name = current_name
+            # 기존 접두사 제거
+            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
+            for prefix in prefixes:
+                if clean_name.startswith(prefix):
+                    clean_name = clean_name[len(prefix):]
+                    break
+            clean_name = clean_name.strip()
+            new_nick = f"[관전] {clean_name}"[:32]
+
+            try:
+                await member.edit(nick=new_nick)
+                await interaction.response.send_message(f"✅ 닉네임이 **{new_nick}**(으)로 변경되었습니다.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "❌ 닉네임을 변경할 권한이 없습니다.\n"
+                    "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
+                    ephemeral=True
+                )
+            except discord.HTTPException as e:
+                await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+        finally:
+            if interaction.response.is_done():
+                await asyncio.sleep(3)
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
 
     @discord.ui.button(label="대기", style=discord.ButtonStyle.success, custom_id="status_nick_wait")
     async def wait_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
-            return
-
-        current_name = member.nick or member.name
-        clean_name = current_name
-        # 기존 접두사 제거
-        prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-        for prefix in prefixes:
-            if clean_name.startswith(prefix):
-                clean_name = clean_name[len(prefix):]
-                break
-        clean_name = clean_name.strip()
-        new_nick = f"[대기] {clean_name}"[:32]
-
         try:
-            await member.edit(nick=new_nick)
-            await interaction.response.send_message(f"✅ 닉네임이 **{new_nick}**(으)로 변경되었습니다.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ 닉네임을 변경할 권한이 없습니다.\n"
-                "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
-                ephemeral=True
-            )
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+            member = interaction.user
+            if not isinstance(member, discord.Member):
+                await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
+                return
+
+            current_name = member.nick or member.name
+            clean_name = current_name
+            # 기존 접두사 제거
+            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
+            for prefix in prefixes:
+                if clean_name.startswith(prefix):
+                    clean_name = clean_name[len(prefix):]
+                    break
+            clean_name = clean_name.strip()
+            new_nick = f"[대기] {clean_name}"[:32]
+
+            try:
+                await member.edit(nick=new_nick)
+                await interaction.response.send_message(f"✅ 닉네임이 **{new_nick}**(으)로 변경되었습니다.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "❌ 닉네임을 변경할 권한이 없습니다.\n"
+                    "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
+                    ephemeral=True
+                )
+            except discord.HTTPException as e:
+                await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+        finally:
+            if interaction.response.is_done():
+                await asyncio.sleep(3)
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
 
     @discord.ui.button(label="원래대로", style=discord.ButtonStyle.secondary, custom_id="status_nick_reset")
     async def reset_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        member = interaction.user
-        if not isinstance(member, discord.Member):
-            await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
-            return
-
-        current_name = member.nick or member.name
-        clean_name = current_name
-        # 기존 접두사 제거
-        prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-        for prefix in prefixes:
-            if clean_name.startswith(prefix):
-                clean_name = clean_name[len(prefix):]
-                break
-        clean_name = clean_name.strip()
-
-        # 닉네임을 원래대로 돌리려면, 닉네임이 member.name과 같으면 nick=None을 설정하는 것이 좋음
-        new_nick = None if clean_name == member.name else clean_name
-        if new_nick is not None:
-            new_nick = new_nick[:32]
-
         try:
-            await member.edit(nick=new_nick)
-            if new_nick:
-                await interaction.response.send_message(f"✅ 닉네임이 원래대로 (**{new_nick}**) 변경되었습니다.", ephemeral=True)
-            else:
-                await interaction.response.send_message("✅ 원래 닉네임(디스코드 기본 이름)으로 복원되었습니다.", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(
-                "❌ 닉네임을 변경할 권한이 없습니다.\n"
-                "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
-                ephemeral=True
-            )
-        except discord.HTTPException as e:
-            await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+            member = interaction.user
+            if not isinstance(member, discord.Member):
+                await interaction.response.send_message("❌ 이 버튼은 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
+                return
+
+            current_name = member.nick or member.name
+            clean_name = current_name
+            # 기존 접두사 제거
+            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
+            for prefix in prefixes:
+                if clean_name.startswith(prefix):
+                    clean_name = clean_name[len(prefix):]
+                    break
+            clean_name = clean_name.strip()
+
+            # 닉네임을 원래대로 돌리려면, 닉네임이 member.name과 같으면 nick=None을 설정하는 것이 좋음
+            new_nick = None if clean_name == member.name else clean_name
+            if new_nick is not None:
+                new_nick = new_nick[:32]
+
+            try:
+                await member.edit(nick=new_nick)
+                if new_nick:
+                    await interaction.response.send_message(f"✅ 닉네임이 원래대로 (**{new_nick}**) 변경되었습니다.", ephemeral=True)
+                else:
+                    await interaction.response.send_message("✅ 원래 닉네임(디스코드 기본 이름)으로 복원되었습니다.", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "❌ 닉네임을 변경할 권한이 없습니다.\n"
+                    "(봇의 역할 서열이 본인보다 낮거나, 본인이 서버 소유자이거나, 봇에게 '닉네임 변경' 권한이 없을 수 있습니다.)",
+                    ephemeral=True
+                )
+            except discord.HTTPException as e:
+                await interaction.response.send_message(f"❌ 닉네임 변경 중 오류가 발생했습니다: {e}", ephemeral=True)
+        finally:
+            if interaction.response.is_done():
+                await asyncio.sleep(3)
+                try:
+                    await interaction.delete_original_response()
+                except Exception:
+                    pass
 
 
 def get_seconds_until_next_reset():
