@@ -3214,6 +3214,10 @@ async def on_voice_state_update(member, before, after):
         1510992054174351510: {
             "category_id": 1511040771241935069,
             "channel_name": "🫧・『 싱글게임 』"
+        },
+        1532691400230047805: {
+            "category_id": 1532692129569046559,
+            "channel_name": "🎮・일반 게임"
         }
     }
 
@@ -3247,17 +3251,16 @@ async def on_voice_state_update(member, before, after):
         # 퇴장한 채널이 CONFIGS 설정 중 하나와 매칭되는지 확인
         for hub_id, config in CONFIGS.items():
             if before.channel.category and before.channel.category.id == config["category_id"]:
-                if before.channel.name == config["channel_name"] and before.channel.id != hub_id:
-                    # 채널이 비어 있는지 확인 (멤버 수가 0인 경우)
-                    if len(before.channel.members) == 0:
-                        try:
-                            await before.channel.delete()
-                            print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
-                        except discord.Forbidden:
-                            print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
-                        except Exception as e:
-                            print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
-                        break  # 채널이 매칭되어 삭제 처리되었으므로 루프 탈출
+                # 허브 채널 자체가 아니고(임시 생성된 채널만), 멤버 수가 0인 경우에 삭제 (이름 변경 지원)
+                if before.channel.id != hub_id and len(before.channel.members) == 0:
+                    try:
+                        await before.channel.delete()
+                        print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
+                    except discord.Forbidden:
+                        print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
+                    except Exception as e:
+                        print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
+                    break  # 채널이 매칭되어 삭제 처리되었으므로 루프 탈출
 
 
 
