@@ -2907,6 +2907,92 @@ async def create_status_panel(interaction: discord.Interaction):
     await interaction.channel.send(embed=embed, view=StatusNicknameView())
 
 
+@bot.tree.command(name="팀나누기", description="대기방 채널의 유저들을 팀으로 나누어 이동시킵니다.")
+@app_commands.default_permissions(administrator=True)
+@app_commands.describe(team_size="한 팀당 인원수 (기본값: 5)")
+async def split_teams(interaction: discord.Interaction, team_size: int = 5):
+    if team_size <= 0:
+        await interaction.response.send_message("❌ 팀 인원수는 1명 이상이어야 합니다.", ephemeral=True)
+        return
+        
+    hub_channel_id = 1532691400230047805
+    category_id = 1532692129569046559
+    
+    guild = interaction.guild
+    hub_channel = guild.get_channel(hub_channel_id)
+    category = guild.get_channel(category_id)
+    
+    if not hub_channel or not isinstance(hub_channel, discord.VoiceChannel):
+        await interaction.response.send_message("❌ 대상 대기방 음성 채널을 찾을 수 없습니다.", ephemeral=True)
+        return
+        
+    if not category or not isinstance(category, discord.CategoryChannel):
+        await interaction.response.send_message("❌ 대상 카테고리를 찾을 수 없습니다.", ephemeral=True)
+        return
+        
+    members = [m for m in hub_channel.members if not m.bot]
+    if not members:
+        await interaction.response.send_message("❌ 대상 대기방 채널에 유저가 없습니다.", ephemeral=True)
+        return
+        
+    await interaction.response.defer(ephemeral=True)
+    
+    # 섞기 및 분배
+    random.shuffle(members)
+    chunks = [members[i:i + team_size] for i in range(0, len(members), team_size)]
+    
+    import string
+    created_channels = []
+    failed_moves = 0
+    success_moves = 0
+    
+    for chunk in chunks:
+        # 비어 있는 알파벳 팀 채널명 찾기
+        existing_names = [c.name for c in category.voice_channels]
+        new_name = None
+        for char in string.ascii_uppercase:
+            candidate = f"{char}팀"
+            if candidate not in existing_names:
+                new_name = candidate
+                break
+        if not new_name:
+            i = 2
+            while True:
+                candidate = f"A팀 {i}"
+                if candidate not in existing_names:
+                    new_name = candidate
+                    break
+                i += 1
+                
+        try:
+            # 채널 생성
+            new_channel = await guild.create_voice_channel(name=new_name, category=category)
+            created_channels.append(new_channel)
+            
+            # 유저 이동
+            for member in chunk:
+                try:
+                    await member.move_to(new_channel)
+                    success_moves += 1
+                except Exception as move_err:
+                    print(f"❌ 멤버 {member.name} 이동 실패: {move_err}")
+                    failed_moves += 1
+        except discord.Forbidden:
+            await interaction.followup.send("❌ 채널 생성 권한이 부족합니다.", ephemeral=True)
+            return
+        except Exception as create_err:
+            await interaction.followup.send(f"❌ 채널 생성 중 오류 발생: {create_err}", ephemeral=True)
+            return
+
+    result_msg = f"✅ 총 {len(members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+    result_msg += f"🔊 생성된 채널: {', '.join([c.name for c in created_channels])}\n"
+    result_msg += f"👥 이동 완료: {success_moves}명"
+    if failed_moves > 0:
+        result_msg += f" (실패: {failed_moves}명)"
+        
+    await interaction.followup.send(result_msg, ephemeral=True)
+
+
 @bot.tree.command(name="로또조회", description="저장된 나의 로또 번호 내역을 조회합니다.")
 async def lotto_lookup(interaction: discord.Interaction):
     embed = get_saved_lotto_tickets_embed(interaction.user.id)
@@ -2958,6 +3044,94 @@ async def on_message(message):
         else:
             # DM이거나 관리자가 아닌 경우
             await message.channel.send("❌ 이 명령어는 관리자만 사용할 수 있습니다.", delete_after=5)
+        return
+
+    # "!팀나누기" 텍스트 명령어 대응 (관리자용)
+    if message.content.strip().startswith("!팀나누기"):
+        if isinstance(message.author, discord.Member) and message.author.guild_permissions.administrator:
+            # 인원수 파싱 (예: !팀나누기 5 또는 !팀나누기)
+            parts = message.content.strip().split()
+            team_size = 5
+            if len(parts) >= 2:
+                try:
+                    team_size = int(parts[1])
+                except ValueError:
+                    await message.reply("❌ 팀 인원수는 숫자여야 합니다. (예: `!팀나누기 5`)", delete_after=5)
+                    return
+            
+            if team_size <= 0:
+                await message.reply("❌ 팀 인원수는 1명 이상이어야 합니다.", delete_after=5)
+                return
+
+            hub_channel_id = 1532691400230047805
+            category_id = 1532692129569046559
+            
+            guild = message.guild
+            hub_channel = guild.get_channel(hub_channel_id)
+            category = guild.get_channel(category_id)
+            
+            if not hub_channel or not isinstance(hub_channel, discord.VoiceChannel):
+                await message.reply("❌ 대상 대기방 음성 채널을 찾을 수 없습니다.", delete_after=5)
+                return
+                
+            if not category or not isinstance(category, discord.CategoryChannel):
+                await message.reply("❌ 대상 카테고리를 찾을 수 없습니다.", delete_after=5)
+                return
+                
+            members = [m for m in hub_channel.members if not m.bot]
+            if not members:
+                await message.reply("❌ 대상 대기방 채널에 유저가 없습니다.", delete_after=5)
+                return
+                
+            random.shuffle(members)
+            chunks = [members[i:i + team_size] for i in range(0, len(members), team_size)]
+            
+            status_msg = await message.reply("⏳ 팀 분배 및 채널 생성을 시작합니다...")
+            
+            import string
+            created_channels = []
+            failed_moves = 0
+            success_moves = 0
+            
+            for chunk in chunks:
+                existing_names = [c.name for c in category.voice_channels]
+                new_name = None
+                for char in string.ascii_uppercase:
+                    candidate = f"{char}팀"
+                    if candidate not in existing_names:
+                        new_name = candidate
+                        break
+                if not new_name:
+                    i = 2
+                    while True:
+                        candidate = f"A팀 {i}"
+                        if candidate not in existing_names:
+                            new_name = candidate
+                            break
+                        i += 1
+                
+                try:
+                    new_channel = await guild.create_voice_channel(name=new_name, category=category)
+                    created_channels.append(new_channel)
+                    for member in chunk:
+                        try:
+                            await member.move_to(new_channel)
+                            success_moves += 1
+                        except Exception:
+                            failed_moves += 1
+                except Exception as e:
+                    await status_msg.edit(content=f"❌ 오류가 발생했습니다: {e}")
+                    return
+            
+            result_msg = f"✅ 총 {len(members)}명을 {team_size}명씩 나누어 {len(chunks)}개의 팀 채널을 생성했습니다.\n"
+            result_msg += f"🔊 생성된 채널: {', '.join([c.name for c in created_channels])}\n"
+            result_msg += f"👥 이동 완료: {success_moves}명"
+            if failed_moves > 0:
+                result_msg += f" (실패: {failed_moves}명)"
+                
+            await status_msg.edit(content=result_msg)
+        else:
+            await message.reply("❌ 이 명령어는 관리자만 사용할 수 있습니다.", delete_after=5)
         return
 
     # 지정한 채널 ID 확인
@@ -3214,11 +3388,6 @@ async def on_voice_state_update(member, before, after):
         1510992054174351510: {
             "category_id": 1511040771241935069,
             "channel_name": "🫧・『 싱글게임 』"
-        },
-        1532691400230047805: {
-            "category_id": 1532692129569046559,
-            "channel_name": "A팀",
-            "use_alphabet": True
         }
     }
 
@@ -3271,19 +3440,30 @@ async def on_voice_state_update(member, before, after):
 
     # 2. 유저 퇴장 감지 및 빈 임시 채널 삭제
     if before.channel and before.channel != after.channel:
-        # 퇴장한 채널이 CONFIGS 설정 중 하나와 매칭되는지 확인
-        for hub_id, config in CONFIGS.items():
-            if before.channel.category and before.channel.category.id == config["category_id"]:
-                # 허브 채널 자체가 아니고(임시 생성된 채널만), 멤버 수가 0인 경우에 삭제 (이름 변경 지원)
-                if before.channel.id != hub_id and len(before.channel.members) == 0:
-                    try:
-                        await before.channel.delete()
-                        print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
-                    except discord.Forbidden:
-                        print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
-                    except Exception as e:
-                        print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
-                    break  # 채널이 매칭되어 삭제 처리되었으므로 루프 탈출
+        # 퇴장 감지할 카테고리 ID 목록 수집
+        target_categories = [config["category_id"] for config in CONFIGS.values()]
+        # 팀 나누기 카테고리 ID(1532692129569046559)도 자동 삭제 대상 카테고리에 포함시킴
+        team_category_id = 1532692129569046559
+        if team_category_id not in target_categories:
+            target_categories.append(team_category_id)
+            
+        # 허브 채널 ID 목록 수집 (허브 채널 자체는 삭제 방지)
+        hub_channel_ids = list(CONFIGS.keys())
+        # 팀 나누기 허브 채널 ID도 삭제 방지 목록에 포함시킴
+        team_hub_id = 1532691400230047805
+        if team_hub_id not in hub_channel_ids:
+            hub_channel_ids.append(team_hub_id)
+
+        if before.channel.category and before.channel.category.id in target_categories:
+            # 허브 채널이 아니고 빈 채널이면 삭제 (이름 변경 지원)
+            if before.channel.id not in hub_channel_ids and len(before.channel.members) == 0:
+                try:
+                    await before.channel.delete()
+                    print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
+                except discord.Forbidden:
+                    print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
+                except Exception as e:
+                    print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
 
 
 
