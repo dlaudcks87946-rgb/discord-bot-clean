@@ -3217,7 +3217,8 @@ async def on_voice_state_update(member, before, after):
         },
         1532691400230047805: {
             "category_id": 1532692129569046559,
-            "channel_name": "🎮・일반 게임"
+            "channel_name": "A팀",
+            "use_alphabet": True
         }
     }
 
@@ -3229,16 +3230,38 @@ async def on_voice_state_update(member, before, after):
         
         if category and isinstance(category, discord.CategoryChannel):
             try:
+                # 채널 이름 결정
+                channel_name = config["channel_name"]
+                if config.get("use_alphabet"):
+                    existing_names = [c.name for c in category.voice_channels]
+                    import string
+                    new_name = None
+                    for char in string.ascii_uppercase:
+                        candidate = f"{char}팀"
+                        if candidate not in existing_names:
+                            new_name = candidate
+                            break
+                    if not new_name:
+                        # A-Z까지 전부 꽉 찬 경우 예외적으로 A팀 2, A팀 3 ... 검색
+                        i = 2
+                        while True:
+                            candidate = f"A팀 {i}"
+                            if candidate not in existing_names:
+                                new_name = candidate
+                                break
+                            i += 1
+                    channel_name = new_name
+
                 # 지정된 카테고리 하위에 새 음성 채널 생성
                 new_channel = await guild.create_voice_channel(
-                    name=config["channel_name"],
+                    name=channel_name,
                     category=category
                 )
-                print(f"🔊 새 음성 채널 생성 완료: '{config['channel_name']}' (ID: {new_channel.id})")
+                print(f"🔊 새 음성 채널 생성 완료: '{channel_name}' (ID: {new_channel.id})")
                 
                 # 유저를 생성된 채널로 이동
                 await member.move_to(new_channel)
-                print(f"➡️ {member.name} 님을 '{config['channel_name']}' 채널로 이동시켰습니다.")
+                print(f"➡️ {member.name} 님을 '{channel_name}' 채널로 이동시켰습니다.")
             except discord.Forbidden:
                 print("❌ 권한 부족: 채널 생성 또는 멤버 이동 권한이 없습니다.")
             except Exception as e:
