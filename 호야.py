@@ -19,6 +19,27 @@ import re
 DATABASE_URL = os.getenv("DATABASE_URL")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN") or os.getenv("TOKEN")
 
+# ==========================================
+# [임시 음성 채널 설정]
+# ==========================================
+TEMP_CHANNEL_CONFIG = {
+    1511038705932963991: {
+        "category_id": 1357930212146286644,
+        "name": "⚡ㆍ메인 게임"
+    },
+    1511037391765504130: {
+        "category_id": 1427312936098992262,
+        "name": "💫ㆍ종합 게임"
+    },
+    1510992054174351510: {
+        "category_id": 1511040771241935069,
+        "name": "🔊ㆍ음성 채널"
+    }
+}
+
+# 생성된 임시 채널 ID 추적용 집합
+created_temp_channels = set()
+
 def get_db_connection():
     if DATABASE_URL:
         url = DATABASE_URL
@@ -310,7 +331,6 @@ def get_saved_lotto_tickets_embed(user_id: int):
         conn = get_db_connection()
         cursor = conn.cursor()
         p = "%s" if DATABASE_URL else "?"
-        current_round = get_current_lotto_round()
         cursor.execute(f"SELECT numbers, round_no, created_at FROM lotto_tickets WHERE user_id = {p} AND is_checked = 0 ORDER BY id DESC LIMIT 10", (user_id,))
         rows = cursor.fetchall()
         cursor.close()
@@ -632,7 +652,6 @@ async def slash_lotto(interaction: discord.Interaction, 수량: int = 1):
     view = LottoRecommendView(interaction.user.id, 수량, set(), set(), "balanced")
     await interaction.response.send_message(embed=view.create_embed(), view=view)
 
-
 @bot.event
 async def on_message(message):
     if message.author.bot: return
@@ -652,6 +671,8 @@ async def on_message(message):
 @bot.event
 async def on_voice_state_update(member, before, after):
     if member.bot: return
+
+    # 1. 음성 이용 시간 집계 처리
     if before.channel is None and after.channel is not None:
         active_sessions[member.id] = time.time()
     elif before.channel is not None and after.channel is None:
@@ -660,6 +681,31 @@ async def on_voice_state_update(member, before, after):
             duration = int(time.time() - join_time)
             if duration > 0:
                 add_voice_time(member.id, get_current_date(), duration)
+
+    # 2. 지정된 트리거 채널 입장 시 임시 채널 자동 생성 및 사용자 이동
+    if after.channel and after.channel.id in TEMP_CHANNEL_CONFIG:
+        config = TEMP_CHANNEL_CONFIG[after.channel.id]
+        category = member.guild.get_channel(config["category_id"])
+        
+        try:
+            new_channel = await member.guild.create_voice_channel(
+                name=config["name"],
+                category=category
+            )
+            created_temp_channels.add(new_channel.id)
+            await member.move_to(new_channel)
+        except Exception as e:
+            print(f"❌ 임시 음성 채널 생성 또는 이동 실패: {e}")
+
+    # 3. 임시로 생성된 채널에서 모든 멤버가 퇴장했을 때 자동 삭제
+    if before.channel and before.channel.id in created_temp_channels:
+        if len(before.channel.members) == 0:
+            try:
+                channel_to_delete = before.channel
+                created_temp_channels.remove(channel_to_delete.id)
+                await channel_to_delete.delete()
+            except Exception as e:
+                print(f"❌ 임시 음성 채널 삭제 실패: {e}")
 
 # Keep-alive 웹 서버 및 봇 실행
 if __name__ == "__main__":
