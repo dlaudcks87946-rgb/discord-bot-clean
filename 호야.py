@@ -48,9 +48,21 @@ def init_db():
     
     cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS left_users (
-        user_id {user_id_type} PRIMARY KEY
+        user_id {user_id_type} PRIMARY KEY,
+        last_application TEXT,
+        last_messages TEXT
     )
     """)
+    
+    # 마이그레이션: 기존 데이터베이스에 새로운 컬럼 안전하게 추가
+    try:
+        cursor.execute("ALTER TABLE left_users ADD COLUMN last_application TEXT")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE left_users ADD COLUMN last_messages TEXT")
+    except Exception:
+        pass
     
     cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS voice_usage (
@@ -3014,6 +3026,267 @@ async def lotto_lookup(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+# ------------------ 관리자용 신규 명령어 및 UI ------------------
+
+class MultiUserKickConfirmView(discord.ui.View):
+    def __init__(self, targets, admin_user):
+        super().__init__(timeout=60)
+        self.targets = targets
+        self.admin_user = admin_user
+
+    @discord.ui.button(label="추방하기", style=discord.ButtonStyle.danger)
+    async def confirm_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        success_list = []
+        fail_list = []
+
+        for member in self.targets:
+            try:
+                # 실제로 추방 실행
+                await member.kick(reason=f"관리자 {self.admin_user.name}에 의한 일괄 추방")
+                success_list.append(f"{member.name} ({member.id})")
+            except discord.Forbidden:
+                fail_list.append(f"{member.name} ({member.id}) - 권한 부족")
+            except Exception as e:
+                fail_list.append(f"{member.name} ({member.id}) - {str(e)}")
+
+        result_embed = discord.Embed(
+            title="✅ 일괄 추방 완료",
+            description=f"추방 요청 {len(self.targets)}건 중 성공 {len(success_list)}건, 실패 {len(fail_list)}건",
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.now()
+        )
+
+        if success_list:
+            success_str = "\n".join(success_list[:15])
+            if len(success_list) > 15:
+                success_str += f"\n... 외 {len(success_list) - 15}명"
+            result_embed.add_field(name="🟢 성공 유저 목록", value=f"```\n{success_str}\n```", inline=False)
+
+        if fail_list:
+            fail_str = "\n".join(fail_list[:15])
+            if len(fail_list) > 15:
+                fail_str += f"\n... 외 {len(fail_list) - 15}명"
+            result_embed.add_field(name="🔴 실패 유저 목록 (권한 부족 등)", value=f"```\n{fail_str}\n```", inline=False)
+
+        # 모든 버튼 비활성화
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=result_embed, view=None)
+
+    @discord.ui.button(label="취소", style=discord.ButtonStyle.secondary)
+    async def cancel_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(content="🛑 추방 요청이 취소되었습니다.", embed=None, view=None)
+
+
+class MultiUserKickView(discord.ui.View):
+    def __init__(self, admin_user):
+        super().__init__(timeout=180)
+        self.admin_user = admin_user
+
+    @discord.ui.select(
+        cls=discord.ui.UserSelect,
+        placeholder="추방할 유저들을 선택하세요 (최대 25명)",
+        min_values=1,
+        max_values=25
+    )
+    async def select_users(self, interaction: discord.Interaction, select: discord.ui.UserSelect):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 선택 메뉴는 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        selected_members = select.values
+
+        # Embed 생성
+        embed = discord.Embed(
+            title="⚠️ 유저 일괄 추방 확인",
+            description=f"정말로 선택한 **{len(selected_members)}명**의 유저를 서버에서 추방하시겠습니까?",
+            color=discord.Color.red()
+        )
+
+        member_list_str = "\n".join([f"• {m.mention} ({m.name} / ID: {m.id})" for m in selected_members])
+        if len(member_list_str) > 1024:
+            member_list_str = member_list_str[:1000] + "\n... 외 다수"
+
+        embed.add_field(name="추방 대상자 목록", value=member_list_str, inline=False)
+        embed.set_footer(text="추방된 유저는 서버에서 즉시 내보내집니다.")
+
+        confirm_view = MultiUserKickConfirmView(selected_members, self.admin_user)
+        await interaction.response.edit_message(content=None, embed=embed, view=confirm_view)
+
+
+@bot.tree.command(name="유저관리", description="[관리자 전용] 유저를 다중 선택하여 일괄 추방(Kick)할 수 있는 UI를 호출합니다.")
+@app_commands.checks.has_permissions(kick_members=True)
+async def user_management(interaction: discord.Interaction):
+    # 본인만 볼 수 있는 비공개 메시지로 유저 관리 패널 전송
+    view = MultiUserKickView(admin_user=interaction.user)
+    await interaction.response.send_message(
+        content="👤 **유저 일괄 관리 패널**\n아래 드롭다운 메뉴를 클릭하여 추방할 유저들을 선택하세요. (최대 25명)",
+        view=view,
+        ephemeral=True
+    )
+
+
+@bot.tree.command(name="유저목록엑셀", description="[관리자 전용] 서버의 모든 멤버 프로필과 DB 데이터를 결합한 엑셀 파일을 추출합니다.")
+@app_commands.checks.has_permissions(administrator=True)
+async def user_list_excel(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    import io
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    try:
+        # 1. 엑셀 워크북 초기화
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "서버 유저 목록"
+
+        # 2. 헤더 스타일 정의
+        font_bold = Font(name="맑은 고딕", size=11, bold=True, color="FFFFFF")
+        font_normal = Font(name="맑은 고딕", size=10)
+        fill_header = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+        align_center = Alignment(horizontal="center", vertical="center")
+        align_left = Alignment(horizontal="left", vertical="center")
+
+        border_side = Side(style="thin", color="D9D9D9")
+        border_all = Border(left=border_side, right=border_side, top=border_side, bottom=border_side)
+
+        headers = [
+            "유저 ID", "디스코드 닉네임", "서버 닉네임", "계정 생성일", "서버 가입일", 
+            "보유 역할", "XP", "코인", "음성 누적(분)"
+        ]
+
+        ws.append(headers)
+        for col_num in range(1, len(headers) + 1):
+            cell = ws.cell(row=1, column=col_num)
+            cell.font = font_bold
+            cell.fill = fill_header
+            cell.alignment = align_center
+            cell.border = border_all
+
+        # 3. DB 데이터 로드
+        conn = get_db_connection()
+        cursor = conn.cursor()
+
+        db_users = {}
+        try:
+            cursor.execute("SELECT user_id, xp, coin, voice_minutes FROM users")
+            rows = cursor.fetchall()
+            for r in rows:
+                db_users[r[0]] = {
+                    "xp": r[1],
+                    "coin": r[2],
+                    "voice_minutes": r[3]
+                }
+        except Exception as db_err:
+            print(f"❌ 엑셀용 DB 조회 중 오류: {db_err}")
+        finally:
+            cursor.close()
+            conn.close()
+
+        # 4. 멤버 목록 조회 및 행 작성
+        row_count = 2
+        
+        # 봇 제외한 멤버 데이터 구성
+        for member in interaction.guild.members:
+            if member.bot:
+                continue
+
+            uid = member.id
+            name = member.name
+            display_name = member.display_name
+            created_at = member.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            joined_at = member.joined_at.strftime("%Y-%m-%d %H:%M:%S") if member.joined_at else "알 수 없음"
+
+            # 역할 목록 (@everyone 제외)
+            roles = [r.name for r in member.roles if r.name != "@everyone"]
+            roles_str = ", ".join(roles) if roles else "역할 없음"
+
+            # DB 연동 데이터
+            xp = db_users.get(uid, {}).get("xp", 0)
+            coin = db_users.get(uid, {}).get("coin", 0)
+            voice_min = db_users.get(uid, {}).get("voice_minutes", 0)
+
+            row_data = [
+                str(uid), name, display_name, created_at, joined_at,
+                roles_str, xp, coin, voice_min
+            ]
+
+            ws.append(row_data)
+
+            # 데이터 행 스타일 적용
+            for col_num in range(1, len(row_data) + 1):
+                cell = ws.cell(row=row_count, column=col_num)
+                cell.font = font_normal
+                cell.border = border_all
+
+                # 정렬 및 서식
+                if col_num in [1, 4, 5]: # ID, 날짜들
+                    cell.alignment = align_center
+                elif col_num in [7, 8, 9]: # 숫자 데이터
+                    cell.alignment = Alignment(horizontal="right", vertical="center")
+                    cell.number_format = "#,##0"
+                else:
+                    cell.alignment = align_left
+
+            row_count += 1
+
+        # 5. 열 너비 자동 조정
+        for col in ws.columns:
+            max_len = 0
+            for cell in col:
+                val_str = str(cell.value or "")
+                lines = val_str.split('\n')
+                for line in lines:
+                    kor_count = len(re.findall(r'[ㄱ-ㅎ|ㅏ-ㅣ|가-힣]', line))
+                    line_len = len(line) + kor_count
+                    if line_len > max_len:
+                        max_len = line_len
+            col_letter = col[0].column_letter
+            ws.column_dimensions[col_letter].width = max(max_len + 3, 10)
+
+        # 6. 바이트 버퍼에 저장하여 파일 전송
+        file_stream = io.BytesIO()
+        wb.save(file_stream)
+        file_stream.seek(0)
+
+        file = discord.File(file_stream, filename=f"서버유저목록_{interaction.guild.name}_{datetime.datetime.now().strftime('%Y%m%d')}.xlsx")
+        await interaction.followup.send(file=file, content="📊 서버 유저 목록 엑셀 파일 추출이 완료되었습니다.", ephemeral=True)
+
+    except Exception as e:
+        print(f"❌ 유저목록엑셀 추출 중 오류: {e}")
+        await interaction.followup.send(content=f"❌ 엑셀 추출 중 오류가 발생했습니다: {e}", ephemeral=True)
+
+
+# @user_management.error 및 @user_list_excel.error 핸들러 (권한 예외 처리)
+@user_management.error
+async def user_management_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ 이 명령어는 추방(Kick) 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 명령어를 처리하는 중에 오류가 발생했습니다.", ephemeral=True)
+
+@user_list_excel.error
+async def user_list_excel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ 이 명령어는 관리자(Administrator) 권한이 있는 유저만 사용할 수 있습니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 명령어를 처리하는 중에 오류가 발생했습니다.", ephemeral=True)
+
+
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.event
 async def on_message(message):
@@ -3299,19 +3572,91 @@ async def on_message(message):
 # 유저 퇴장 감지 이벤트
 @bot.event
 async def on_member_remove(member):
-    # 유저가 서버를 나가면 DB에 기록
+    # 유저가 서버를 나가면 DB에 기록 및 과거 기록 수집
+    import json
+    last_application = None
+    last_messages_list = []
+    
+    try:
+        # 1. 가입 신청 채널(1497843456960364726)에서 작성했던 가입 신청서 찾기
+        app_channel_id = 1497843456960364726
+        app_channel = member.guild.get_channel(app_channel_id)
+        if app_channel and isinstance(app_channel, discord.TextChannel):
+            try:
+                # 최근 200개 글 중 해당 멤버가 쓴 가입 양식 탐색
+                async for msg in app_channel.history(limit=200):
+                    if msg.author.id == member.id:
+                        content_stripped = "".join(msg.content.split())
+                        if any(k in content_stripped for k in ["닉네임", "닉넴", "나이", "게임", "소개"]):
+                            last_application = msg.content
+                            break
+            except Exception as e:
+                print(f"❌ 퇴장 멤버 가입서 조회 중 오류: {e}")
+
+        # 2. 다른 텍스트 채널에서 작성한 최근 메시지 5개 수집
+        collected_msgs = []
+        try:
+            # 봇이 읽을 수 있고 퇴장한 멤버가 보았을 법한 주요 텍스트 채널 탐색 (속도 제한을 위해 최대 15개 채널만 확인)
+            text_channels = [c for c in member.guild.text_channels 
+                             if c.permissions_for(member.guild.me).read_message_history and c.id != app_channel_id]
+            for channel in text_channels[:15]:
+                try:
+                    async for msg in channel.history(limit=50):
+                        if msg.author.id == member.id and msg.content:
+                            # 봇 명령어 등은 제외
+                            if not msg.content.startswith(('!', '/', '$', '?')):
+                                collected_msgs.append({
+                                    "channel": channel.name,
+                                    "content": msg.content,
+                                    "created_at": msg.created_at.isoformat()
+                                })
+                except Exception:
+                    continue
+        except Exception as e:
+            print(f"❌ 퇴장 멤버 대화 메시지 수집 중 오류: {e}")
+
+        # 시간순 정렬 후 최근 5개 선택
+        collected_msgs.sort(key=lambda x: x["created_at"], reverse=True)
+        last_messages_list = collected_msgs[:5]
+
+    except Exception as e:
+        print(f"❌ 퇴장 기록 수집 중 일반 오류 발생: {e}")
+
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         p = "%s" if DATABASE_URL else "?"
-        query = f"INSERT INTO left_users (user_id) VALUES ({p}) ON CONFLICT (user_id) DO NOTHING"
-        cursor.execute(query, (member.id,))
+        
+        # left_users 테이블에 수집된 정보와 함께 저장 (ON CONFLICT 업데이트 대응)
+        if DATABASE_URL:
+            # PostgreSQL
+            query = """
+                INSERT INTO left_users (user_id, last_application, last_messages)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (user_id) 
+                DO UPDATE SET 
+                    last_application = EXCLUDED.last_application,
+                    last_messages = EXCLUDED.last_messages
+            """
+            cursor.execute(query, (member.id, last_application, json.dumps(last_messages_list, ensure_ascii=False)))
+        else:
+            # SQLite
+            query = """
+                INSERT INTO left_users (user_id, last_application, last_messages)
+                VALUES (?, ?, ?)
+                ON CONFLICT (user_id) 
+                DO UPDATE SET 
+                    last_application = excluded.last_application,
+                    last_messages = excluded.last_messages
+            """
+            cursor.execute(query, (member.id, last_application, json.dumps(last_messages_list, ensure_ascii=False)))
+            
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"📥 유저 퇴장 기록 완료: {member.name} ({member.id})")
+        print(f"📥 유저 퇴장 기록 및 메시지 수집 완료: {member.name} ({member.id})")
     except Exception as e:
-        print(f"❌ 퇴장 기록 중 오류 발생: {e}")
+        print(f"❌ 퇴장 기록 중 DB 처리 오류 발생: {e}")
 
 # 유저 입장 감지 이벤트
 @bot.event
@@ -3352,21 +3697,55 @@ async def on_member_join(member):
             print(f"❌ 역할 제거 중 오류 발생: {e}")
     else:
         print(f"❌ 오류: 역할 ID {remove_role_id}를 서버에서 찾을 수 없습니다.")
-
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         p = "%s" if DATABASE_URL else "?"
-        cursor.execute(f"SELECT user_id FROM left_users WHERE user_id = {p}", (member.id,))
+        cursor.execute(f"SELECT user_id, last_application, last_messages FROM left_users WHERE user_id = {p}", (member.id,))
         row = cursor.fetchone()
         
         if row:
             # 이전에 나갔던 기록이 있는 유저가 다시 들어온 경우
+            user_id = row[0]
+            last_app = row[1]
+            last_msgs_json = row[2]
+            
             channel_id = 1498300372479901817
             channel = bot.get_channel(channel_id)
             if channel:
                 try:
-                    await channel.send(f"👤 **재입장 감지:** <@{member.id}> (ID: {member.id}) 님이 서버에 다시 입장하셨습니다.")
+                    embed = discord.Embed(
+                        title="👤 재입장 감지",
+                        description=f"<@{member.id}> (ID: {member.id}) 님이 서버에 다시 입장하셨습니다.",
+                        color=discord.Color.green(),
+                        timestamp=datetime.datetime.now()
+                    )
+                    
+                    if last_app:
+                        # 글자수 제한 1024자 고려
+                        app_display = last_app[:1024] if len(last_app) <= 1024 else last_app[:1021] + "..."
+                        embed.add_field(name="📝 과거 작성한 가입 신청서", value=f"```\n{app_display}\n```", inline=False)
+                        
+                    if last_msgs_json:
+                        try:
+                            last_msgs = json.loads(last_msgs_json)
+                            if last_msgs:
+                                msg_lines = []
+                                for m in last_msgs:
+                                    # 시간 파싱
+                                    try:
+                                        dt = datetime.datetime.fromisoformat(m["created_at"])
+                                        time_str = dt.strftime("%m/%d %H:%M")
+                                    except Exception:
+                                        time_str = "시간 정보 없음"
+                                    content_display = m["content"][:100] if len(m["content"]) <= 100 else m["content"][:97] + "..."
+                                    msg_lines.append(f"[{time_str}] #{m['channel']}: {content_display}")
+                                
+                                embed.add_field(name="💬 마지막으로 작성한 메시지 (최근 5개)", value="\n".join(msg_lines), inline=False)
+                        except Exception as json_err:
+                            print(f"❌ 메시지 JSON 파싱 오류: {json_err}")
+                            
+                    await channel.send(embed=embed)
                 except Exception as send_err:
                     print(f"❌ 메시지 전송 실패: {send_err}")
             else:
