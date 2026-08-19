@@ -632,7 +632,6 @@ async def slash_lotto(interaction: discord.Interaction, 수량: int = 1):
     view = LottoRecommendView(interaction.user.id, 수량, set(), set(), "balanced")
     await interaction.response.send_message(embed=view.create_embed(), view=view)
 
-@user_list_excel_error = getattr(bot.tree, "error", None) # 예외 처리 핸들러 정리
 
 @bot.event
 async def on_message(message):
