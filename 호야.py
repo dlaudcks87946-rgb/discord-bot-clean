@@ -3171,7 +3171,7 @@ class MultiUserKickView(discord.ui.View):
         super().__init__(timeout=300)
         self.admin_user = admin_user
         self.guild = guild
-        self.all_members = sorted([m for m in guild.members if not m.bot], key=lambda x: x.name.lower())
+        self.all_members = sorted([m for m in guild.members if not m.bot], key=lambda x: x.display_name.lower())
         self.selected_ids = set()
         self.current_page = 0
         self.total_pages = (len(self.all_members) - 1) // 25 + 1 if self.all_members else 1
