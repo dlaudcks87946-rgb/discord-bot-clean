@@ -55,14 +55,28 @@ def init_db():
     """)
     
     # 마이그레이션: 기존 데이터베이스에 새로운 컬럼 안전하게 추가
-    try:
-        cursor.execute("ALTER TABLE left_users ADD COLUMN last_application TEXT")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE left_users ADD COLUMN last_messages TEXT")
-    except Exception:
-        pass
+    if DATABASE_URL:
+        # PostgreSQL에서는 예외 발생 시 트랜잭션이 중단되므로 롤백 필수
+        try:
+            cursor.execute("ALTER TABLE left_users ADD COLUMN last_application TEXT")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+        try:
+            cursor.execute("ALTER TABLE left_users ADD COLUMN last_messages TEXT")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+    else:
+        # SQLite
+        try:
+            cursor.execute("ALTER TABLE left_users ADD COLUMN last_application TEXT")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE left_users ADD COLUMN last_messages TEXT")
+        except Exception:
+            pass
     
     cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS voice_usage (
