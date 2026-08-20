@@ -3044,12 +3044,268 @@ async def lotto_lookup(interaction: discord.Interaction):
     embed = get_saved_lotto_tickets_embed(interaction.user.id)
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ------------------ 관리자용 신규 명령어 및 UI (추방기능 주석 처리됨) ------------------
+# ------------------ 관리자용 신규 명령어 및 UI (안전장치 추가됨) ------------------
+
+class MultiUserKickConfirmView(discord.ui.View):
+    def __init__(self, targets, admin_user):
+        super().__init__(timeout=60)
+        self.targets = targets
+        self.admin_user = admin_user
+
+    @discord.ui.button(label="추방하기", style=discord.ButtonStyle.danger)
+    async def confirm_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        import asyncio
+        await interaction.response.defer(ephemeral=True)
+        
+        # 버튼을 비활성화하고 작업 시작을 알린다.
+        for child in self.children:
+            child.disabled = True
+        await interaction.edit_original_response(
+            content=f"⏳ 총 {len(self.targets)}명의 유저를 추방하는 중입니다. 잠시만 기다려주세요...\n(디스코드 제한 방지를 위해 1초 간격으로 처리됩니다.)",
+            embed=None,
+            view=self
+        )
+
+        success_list = []
+        fail_list = []
+
+        for member in self.targets:
+            try:
+                # 실제로 추방 실행
+                await member.kick(reason=f"관리자 {self.admin_user.name}에 의한 일괄 추방")
+                success_list.append(f"{member.name} ({member.id})")
+                await asyncio.sleep(1.0) # 안전장치: Rate Limit 방어
+            except discord.Forbidden:
+                fail_list.append(f"{member.name} ({member.id}) - 권한 부족")
+            except Exception as e:
+                fail_list.append(f"{member.name} ({member.id}) - {str(e)}")
+
+        result_embed = discord.Embed(
+            title="✅ 일괄 추방 완료",
+            description=f"추방 요청 {len(self.targets)}건 중 성공 {len(success_list)}건, 실패 {len(fail_list)}건",
+            color=discord.Color.orange(),
+            timestamp=datetime.datetime.now()
+        )
+
+        if success_list:
+            success_str = "\n".join(success_list[:15])
+            if len(success_list) > 15:
+                success_str += f"\n... 외 {len(success_list) - 15}명"
+            result_embed.add_field(name="🟢 성공 유저 목록", value=f"```\n{success_str}\n```", inline=False)
+
+        if fail_list:
+            fail_str = "\n".join(fail_list[:15])
+            if len(fail_list) > 15:
+                fail_str += f"\n... 외 {len(fail_list) - 15}명"
+            result_embed.add_field(name="🔴 실패 유저 목록 (권한 부족 등)", value=f"```\n{fail_str}\n```", inline=False)
+
+        # 모든 버튼 비활성화
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.followup.edit_message(message_id=interaction.message.id, embed=result_embed, view=None)
+
+    @discord.ui.button(label="취소", style=discord.ButtonStyle.secondary)
+    async def cancel_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+
+        await interaction.response.edit_message(content="🛑 추방 요청이 취소되었습니다.", embed=None, view=None)
+class PaginationUserSelect(discord.ui.Select):
+    def __init__(self, members, page, parent_view):
+        self.parent_view = parent_view
+        self.page_members = members[page*25 : (page+1)*25]
+        
+        options = []
+        for m in self.page_members:
+            label = f"{m.name}"
+            if m.nick and m.nick != m.name:
+                label += f" ({m.nick})"
+            label = label[:100]
+            
+            is_selected = m.id in self.parent_view.selected_ids
+            prefix = "☑️ " if is_selected else "⬜ "
+            
+            options.append(discord.SelectOption(
+                label=f"{prefix}{label}",
+                value=str(m.id),
+                description=f"ID: {m.id}"
+            ))
+            
+        if not options:
+            options = [discord.SelectOption(label="멤버 없음", value="none")]
+            
+        super().__init__(
+            placeholder=f"멤버를 선택해 주세요 (페이지 {page+1}/{(len(members)-1)//25 + 1})",
+            min_values=1 if options[0].value != "none" else 0,
+            max_values=len(options) if options[0].value != "none" else 0,
+            options=options
+        )
+        
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.parent_view.admin_user.id:
+            await interaction.response.send_message("❌ 이 메뉴는 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+            
+        if self.values and self.values[0] != "none":
+            for val in self.values:
+                uid = int(val)
+                if uid in self.parent_view.selected_ids:
+                    self.parent_view.selected_ids.remove(uid)
+                else:
+                    self.parent_view.selected_ids.add(uid)
+            
+            await self.parent_view.update_view(interaction)
+
+
+class MultiUserKickView(discord.ui.View):
+    def __init__(self, admin_user, guild):
+        super().__init__(timeout=300)
+        self.admin_user = admin_user
+        self.guild = guild
+        self.all_members = sorted([m for m in guild.members if not m.bot], key=lambda x: x.name.lower())
+        self.selected_ids = set()
+        self.current_page = 0
+        self.total_pages = (len(self.all_members) - 1) // 25 + 1 if self.all_members else 1
+        
+        self.setup_components()
+        
+    def setup_components(self):
+        self.clear_items()
+        self.add_item(PaginationUserSelect(self.all_members, self.current_page, self))
+        
+        prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0))
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+        
+        page_btn = discord.ui.Button(label=f"{self.current_page + 1} / {self.total_pages}", style=discord.ButtonStyle.secondary, disabled=True)
+        self.add_item(page_btn)
+        
+        next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= self.total_pages - 1))
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+        
+        confirm_btn = discord.ui.Button(
+            label=f"⚠️ {len(self.selected_ids)}명 추방하기", 
+            style=discord.ButtonStyle.danger, 
+            disabled=(len(self.selected_ids) == 0)
+        )
+        confirm_btn.callback = self.go_to_confirm
+        self.add_item(confirm_btn)
+        
+        cancel_btn = discord.ui.Button(label="🛑 취소", style=discord.ButtonStyle.secondary)
+        cancel_btn.callback = self.cancel_action
+        self.add_item(cancel_btn)
+        
+    async def update_view(self, interaction: discord.Interaction):
+        self.setup_components()
+        
+        embed = discord.Embed(
+            title="👤 유저 일괄 관리 패널 (페이지네이션)",
+            description="목록에서 추방할 멤버들을 선택해 주세요. 여러 페이지를 넘나들며 선택할 수 있습니다.\n"
+                        "선택된 멤버 앞에는 ☑️ 표시가 붙으며, 아래 [추방하기] 버튼에 실시간 반영됩니다.",
+            color=discord.Color.blue()
+        )
+        
+        if self.selected_ids:
+            mentions = []
+            for uid in self.selected_ids:
+                m = self.guild.get_member(uid)
+                if m:
+                    mentions.append(f"{m.mention} ({m.name})")
+                else:
+                    mentions.append(f"알 수 없는 사용자 (ID: {uid})")
+            
+            selected_str = ", ".join(mentions)
+            if len(selected_str) > 1024:
+                selected_str = selected_str[:1000] + " ... 외 다수"
+            embed.add_field(name="📍 현재 선택된 멤버 목록", value=selected_str, inline=False)
+        else:
+            embed.add_field(name="📍 현재 선택된 멤버 목록", value="선택된 유저가 없습니다.", inline=False)
+            
+        await interaction.response.edit_message(embed=embed, view=self)
+        
+    async def prev_page(self, interaction: discord.Interaction):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+        if self.current_page > 0:
+            self.current_page -= 1
+            await self.update_view(interaction)
+            
+    async def next_page(self, interaction: discord.Interaction):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            await self.update_view(interaction)
+            
+    async def go_to_confirm(self, interaction: discord.Interaction):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+            
+        selected_members = []
+        for uid in self.selected_ids:
+            m = self.guild.get_member(uid)
+            if m:
+                selected_members.append(m)
+                
+        if not selected_members:
+            await interaction.response.send_message("❌ 선택된 멤버를 서버에서 찾을 수 없습니다.", ephemeral=True)
+            return
+            
+        embed = discord.Embed(
+            title="⚠️ 유저 일괄 추방 확인",
+            description=f"정말로 선택한 **{len(selected_members)}명**의 유저를 서버에서 추방하시겠습니까?",
+            color=discord.Color.red()
+        )
+        
+        member_list_str = "\n".join([f"• {m.mention} ({m.name} / ID: {m.id})" for m in selected_members])
+        if len(member_list_str) > 1024:
+            member_list_str = member_list_str[:1000] + "\n... 외 다수"
+            
+        embed.add_field(name="추방 대상자 목록", value=member_list_str, inline=False)
+        embed.set_footer(text="추방된 유저는 서버에서 즉시 내보내집니다.")
+        
+        confirm_view = MultiUserKickConfirmView(selected_members, self.admin_user)
+        await interaction.response.edit_message(content=None, embed=embed, view=confirm_view)
+        
+    async def cancel_action(self, interaction: discord.Interaction):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 명령어를 실행한 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+        self.clear_items()
+        await interaction.response.edit_message(content="🛑 추방 작업이 취소되었습니다.", embed=None, view=None)
+
 
 @bot.tree.command(name="유저관리", description="[관리자 전용] 유저를 다중 선택하여 일괄 추방(Kick)할 수 있는 UI를 호출합니다.")
 @app_commands.checks.has_permissions(kick_members=True)
 async def user_management(interaction: discord.Interaction):
-    await interaction.response.send_message("❌ 추방 기능이 현재 비활성화(주석 처리)되어 있습니다.", ephemeral=True)
+    # 본인만 볼 수 있는 비공개 메시지로 유저 관리 패널 전송
+    view = MultiUserKickView(admin_user=interaction.user, guild=interaction.guild)
+    embed = discord.Embed(
+        title="👤 유저 일괄 관리 패널 (페이지네이션)",
+        description="목록에서 추방할 멤버들을 선택해 주세요. 여러 페이지를 넘나들며 선택할 수 있습니다.\n"
+                    "선택된 멤버 앞에는 ☑️ 표시가 붙으며, 아래 [추방하기] 버튼에 실시간 반영됩니다.",
+        color=discord.Color.blue()
+    )
+    embed.add_field(name="📍 현재 선택된 멤버 목록", value="선택된 유저가 없습니다.", inline=False)
+    await interaction.response.send_message(
+        embed=embed,
+        view=view,
+        ephemeral=True
+    )
+
 
 
 @bot.tree.command(name="유저목록엑셀", description="[관리자 전용] 서버의 모든 멤버 프로필과 DB 데이터를 결합한 엑셀 파일을 추출합니다.")
@@ -3184,8 +3440,13 @@ async def user_list_excel(interaction: discord.Interaction):
         await interaction.followup.send(content=f"❌ 엑셀 추출 중 오류가 발생했습니다: {e}", ephemeral=True)
 
 
-# @user_management.error 및 @user_list_excel.error 핸들러 (권한 예외 처리)
-
+# 권한 예외 처리 핸들러
+@user_management.error
+async def user_management_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.MissingPermissions):
+        await interaction.response.send_message("❌ 이 명령어는 추방(Kick) 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ 명령어를 처리하는 중에 오류가 발생했습니다.", ephemeral=True)
 
 @user_list_excel.error
 async def user_list_excel_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -3193,7 +3454,6 @@ async def user_list_excel_error(interaction: discord.Interaction, error: app_com
         await interaction.response.send_message("❌ 이 명령어는 관리자(Administrator) 권한이 있는 유저만 사용할 수 있습니다.", ephemeral=True)
     else:
         await interaction.response.send_message("❌ 명령어를 처리하는 중에 오류가 발생했습니다.", ephemeral=True)
-
 
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.event
