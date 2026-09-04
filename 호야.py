@@ -2342,6 +2342,170 @@ class MonthlyRankingView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
+class InactiveSelect(discord.ui.Select):
+    def __init__(self, page_items, parent_view):
+        self.parent_view = parent_view
+        self.page_items = page_items
+        
+        guild = parent_view.guild
+        me = guild.me if guild else None
+        
+        options = []
+        for item in page_items:
+            m = item["member"]
+            uid = item["user_id"]
+            is_selected = uid in parent_view.selected_ids
+            prefix = "☑️ " if is_selected else "⬜ "
+            
+            # 봇 권한 체크 (추방 가능 여부)
+            can_kick = True
+            if guild and (m == guild.owner or (me and me.top_role <= m.top_role)):
+                can_kick = False
+                
+            label = f"{prefix}{item['display_name']} ({item['inactive_days']}일 미접속)"
+            if not can_kick:
+                label = f"🔒 {item['display_name']} (관리자/보호)"
+            label = label[:100]
+            
+            desc = f"ID: {uid} | 최근: {item['last_date_str']}"
+            if not can_kick:
+                desc = "봇보다 권한이 높거나 서버 소유자입니다."
+            desc = desc[:100]
+            
+            options.append(discord.SelectOption(
+                label=label,
+                value=str(uid),
+                description=desc
+            ))
+            
+        if not options:
+            options = [discord.SelectOption(label="선택 가능한 멤버 없음", value="none")]
+            
+        super().__init__(
+            placeholder="추방할 미접속 멤버를 선택하세요 (클릭하여 체크/해제)...",
+            min_values=1 if options[0].value != "none" else 0,
+            max_values=len(options) if options[0].value != "none" else 0,
+            options=options,
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if not (interaction.user.guild_permissions.kick_members or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ 이 기능은 멤버 추방(Kick) 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        if self.values and self.values[0] != "none":
+            guild = self.parent_view.guild
+            me = guild.me if guild else None
+            for val in self.values:
+                uid = int(val)
+                target_item = next((it for it in self.parent_view.inactive_list if it["user_id"] == uid), None)
+                if target_item:
+                    m = target_item["member"]
+                    if guild and (m == guild.owner or (me and me.top_role <= m.top_role)):
+                        continue
+                
+                if uid in self.parent_view.selected_ids:
+                    self.parent_view.selected_ids.remove(uid)
+                else:
+                    self.parent_view.selected_ids.add(uid)
+                    
+            await self.parent_view.update_view(interaction)
+
+
+class InactiveKickConfirmView(discord.ui.View):
+    def __init__(self, guild, year, month, inactive_list, selected_targets, admin_user):
+        super().__init__(timeout=120)
+        self.guild = guild
+        self.year = year
+        self.month = month
+        self.inactive_list = inactive_list
+        self.selected_targets = selected_targets
+        self.admin_user = admin_user
+
+    @discord.ui.button(label="🚨 추방 확정 및 실행", style=discord.ButtonStyle.danger)
+    async def confirm_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 추방을 요청한 관리자만 누를 수 있습니다.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        
+        for child in self.children:
+            child.disabled = True
+            
+        await interaction.edit_original_response(
+            content=f"⏳ 총 **{len(self.selected_targets)}명**의 미접속 멤버를 순차 추방하는 중입니다...\n*(디스코드 제한 방지를 위해 1초 간격으로 안전하게 처리됩니다.)*",
+            embed=None,
+            view=self
+        )
+        
+        success_list = []
+        fail_list = []
+        
+        me = self.guild.me
+        for item in self.selected_targets:
+            m = item["member"]
+            display_name = item["display_name"]
+            inactive_days = item["inactive_days"]
+            
+            if m == self.guild.owner:
+                fail_list.append(f"{display_name} - 서버 소유자")
+                continue
+            if me and me.top_role <= m.top_role:
+                fail_list.append(f"{display_name} - 봇보다 상위 역할")
+                continue
+                
+            try:
+                await m.kick(reason=f"관리자 {self.admin_user.name}에 의한 2주 이상 미접속 멤버 정리 ({inactive_days}일 미접속)")
+                success_list.append(f"{display_name} ({inactive_days}일 미접속)")
+                await asyncio.sleep(1.0)
+            except discord.Forbidden:
+                fail_list.append(f"{display_name} - 권한 부족")
+            except Exception as e:
+                fail_list.append(f"{display_name} - {str(e)}")
+                
+        result_embed = discord.Embed(
+            title="✅ 미접속 멤버 일괄 추방 완료",
+            description=f"추방 요청 **{len(self.selected_targets)}명** 중 성공 **{len(success_list)}명**, 실패 **{len(fail_list)}명**",
+            color=0x57F287 if not fail_list else 0xFEE75C,
+            timestamp=datetime.datetime.now()
+        )
+        
+        if success_list:
+            succ_str = "\n".join(success_list[:20])
+            if len(success_list) > 20:
+                succ_str += f"\n... 외 {len(success_list) - 20}명"
+            result_embed.add_field(name="🟢 성공 유저 목록", value=f"```\n{succ_str}\n```", inline=False)
+            
+        if fail_list:
+            fail_str = "\n".join(fail_list[:20])
+            if len(fail_list) > 20:
+                fail_str += f"\n... 외 {len(fail_list) - 20}명"
+            result_embed.add_field(name="🔴 실패 유저 목록 (권한 부족 등)", value=f"```\n{fail_str}\n```", inline=False)
+
+        success_uids = {t["user_id"] for t in self.selected_targets if any(t["display_name"] in s for s in success_list)}
+        updated_inactive = [it for it in self.inactive_list if it["user_id"] not in success_uids]
+        
+        back_view = discord.ui.View(timeout=180)
+        back_btn = discord.ui.Button(label="🔙 미접속자 명단으로 돌아가기", style=discord.ButtonStyle.primary)
+        async def back_callback(inter: discord.Interaction):
+            new_v = InactiveMembersView(self.guild, self.year, self.month, updated_inactive)
+            await inter.response.edit_message(content=None, embed=new_v.create_embed(), view=new_v)
+        back_btn.callback = back_callback
+        back_view.add_item(back_btn)
+        
+        await interaction.edit_original_response(content=None, embed=result_embed, view=back_view)
+
+    @discord.ui.button(label="🛑 취소", style=discord.ButtonStyle.secondary)
+    async def cancel_kick(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.admin_user.id:
+            await interaction.response.send_message("❌ 이 버튼은 추방을 요청한 관리자만 누를 수 있습니다.", ephemeral=True)
+            return
+        view = InactiveMembersView(self.guild, self.year, self.month, self.inactive_list)
+        await interaction.response.edit_message(content=None, embed=view.create_embed(), view=view)
+
+
 class InactiveMembersView(discord.ui.View):
     def __init__(self, guild, year, month, inactive_list):
         super().__init__(timeout=300)
@@ -2349,33 +2513,49 @@ class InactiveMembersView(discord.ui.View):
         self.year = year
         self.month = month
         self.inactive_list = inactive_list
+        self.selected_ids = set()
         self.current_page = 0
         self.per_page = 15
         self.total_pages = (len(inactive_list) - 1) // self.per_page + 1 if inactive_list else 1
-        self.update_buttons()
+        self.setup_components()
 
-    def update_buttons(self):
+    def setup_components(self):
         self.clear_items()
         
-        prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0))
+        start_idx = self.current_page * self.per_page
+        page_items = self.inactive_list[start_idx : start_idx + self.per_page]
+        
+        if page_items:
+            self.add_item(InactiveSelect(page_items, self))
+        
+        prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0), row=1)
         prev_btn.callback = self.prev_page
         self.add_item(prev_btn)
 
-        page_btn = discord.ui.Button(label=f"{self.current_page + 1} / {self.total_pages}", style=discord.ButtonStyle.secondary, disabled=True)
+        page_btn = discord.ui.Button(label=f"{self.current_page + 1} / {self.total_pages}", style=discord.ButtonStyle.secondary, disabled=True, row=1)
         self.add_item(page_btn)
 
-        next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= self.total_pages - 1))
+        next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= self.total_pages - 1), row=1)
         next_btn.callback = self.next_page
         self.add_item(next_btn)
 
-        back_btn = discord.ui.Button(label="🔙 대시보드로 돌아가기", style=discord.ButtonStyle.primary)
+        kick_btn = discord.ui.Button(
+            label=f"⚠️ {len(self.selected_ids)}명 추방하기", 
+            style=discord.ButtonStyle.danger, 
+            disabled=(len(self.selected_ids) == 0),
+            row=1
+        )
+        kick_btn.callback = self.go_to_confirm
+        self.add_item(kick_btn)
+
+        back_btn = discord.ui.Button(label="🔙 대시보드로", style=discord.ButtonStyle.primary, row=1)
         back_btn.callback = self.go_back
         self.add_item(back_btn)
 
     def create_embed(self):
         embed = discord.Embed(
             title="🚨 2주(14일) 이상 미접속 멤버 명단",
-            description=f"최근 14일 이상 음성 채널에 들어오지 않은 멤버 목록입니다.\n총 대상자: **{len(self.inactive_list):,}명** (페이지 {self.current_page + 1}/{self.total_pages})\n\n",
+            description="",
             color=0xED4245
         )
         start_idx = self.current_page * self.per_page
@@ -2384,30 +2564,79 @@ class InactiveMembersView(discord.ui.View):
         lines = []
         for idx, item in enumerate(page_items, start_idx + 1):
             status_type = "최근 음성" if item["has_record"] else "가입일"
+            is_sel = "☑️ " if item["user_id"] in self.selected_ids else ""
             lines.append(
-                f"`{idx:02d}.` **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
+                f"{is_sel}`{idx:02d}.` **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
             )
             
-        embed.description = f"최근 14일 이상 음성 채널 미접속 멤버 목록입니다.\n총 인원: **{len(self.inactive_list):,}명** (오래 안 들어온 순 정렬)\n\n" + "\n".join(lines)
-        embed.set_footer(text="닉네임 옆에 미접속 일수 및 최근 활동일(또는 가입일)이 표기됩니다.")
+        desc = (
+            f"최근 14일 이상 음성 채널 미접속 멤버 목록입니다.\n"
+            f"총 인원: **{len(self.inactive_list):,}명** (페이지 {self.current_page + 1}/{self.total_pages})\n\n"
+            + "\n".join(lines)
+        )
+        
+        if self.selected_ids:
+            sel_mentions = [f"<@{uid}>" for uid in self.selected_ids]
+            sel_str = ", ".join(sel_mentions)
+            if len(sel_str) > 500:
+                sel_str = sel_str[:500] + " ... 외 다수"
+            embed.add_field(name=f"📍 현재 추방 선택된 멤버 ({len(self.selected_ids)}명)", value=sel_str, inline=False)
+            
+        embed.description = desc
+        embed.set_footer(text="상단 드롭다운에서 멤버를 선택한 후 [추방하기] 버튼으로 안전하게 일괄 추방할 수 있습니다.")
         return embed
+
+    async def update_view(self, interaction: discord.Interaction):
+        self.setup_components()
+        await interaction.response.edit_message(embed=self.create_embed(), view=self)
 
     async def prev_page(self, interaction: discord.Interaction):
         if self.current_page > 0:
             self.current_page -= 1
-            self.update_buttons()
+            self.setup_components()
             await interaction.response.edit_message(embed=self.create_embed(), view=self)
 
     async def next_page(self, interaction: discord.Interaction):
         if self.current_page < self.total_pages - 1:
             self.current_page += 1
-            self.update_buttons()
+            self.setup_components()
             await interaction.response.edit_message(embed=self.create_embed(), view=self)
 
     async def go_back(self, interaction: discord.Interaction):
         embed = build_monthly_dashboard_embed(self.guild, self.year, self.month)
         view = MonthlyDashboardView(self.guild, self.year, self.month)
         await interaction.response.edit_message(embed=embed, view=view)
+
+    async def go_to_confirm(self, interaction: discord.Interaction):
+        if not (interaction.user.guild_permissions.kick_members or interaction.user.guild_permissions.administrator):
+            await interaction.response.send_message("❌ 이 기능은 멤버 추방(Kick) 권한이 있는 관리자만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        targets = [it for it in self.inactive_list if it["user_id"] in self.selected_ids]
+        if not targets:
+            await interaction.response.send_message("❌ 선택된 추방 대상 멤버가 없습니다.", ephemeral=True)
+            return
+
+        embed = discord.Embed(
+            title="⚠️ 미접속 멤버 일괄 추방 2차 확인",
+            description=(
+                f"정말로 선택한 **{len(targets)}명**의 미접속 멤버를 서버에서 추방하시겠습니까?\n\n"
+                f"⚠️ **안내사항**\n"
+                f"• 추방된 멤버는 서버에서 즉시 내보내집니다.\n"
+                f"• 디스코드 제한(Rate Limit) 방지를 위해 **1초 간격으로 안전하게 순차 진행**됩니다."
+            ),
+            color=0xED4245
+        )
+        
+        target_lines = [f"• **{t['display_name']}** (<@{t['user_id']}>) — **{t['inactive_days']}일 미접속**" for t in targets]
+        target_str = "\n".join(target_lines)
+        if len(target_str) > 1024:
+            target_str = target_str[:1000] + "\n... 외 다수"
+        embed.add_field(name=f"추방 대상자 목록 ({len(targets)}명)", value=target_str, inline=False)
+        embed.set_footer(text="추방을 진행하려면 아래 [추방 확정 및 실행] 버튼을 눌러주세요.")
+
+        confirm_view = InactiveKickConfirmView(self.guild, self.year, self.month, self.inactive_list, targets, interaction.user)
+        await interaction.response.edit_message(embed=embed, view=confirm_view)
 
 
 # =========================
@@ -3936,18 +4165,6 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
     await interaction.response.send_message(embed=embed, view=view)
 
 
-@bot.tree.command(name="미접속자", description="2주(14일) 이상 음성 채널에 접속하지 않은 멤버 목록과 미접속 일수를 조회합니다.")
-async def inactive_members_cmd(interaction: discord.Interaction):
-    now = get_kst_now()
-    inactive_list = get_inactive_members(interaction.guild, days_threshold=14) if interaction.guild else []
-    if not inactive_list:
-        await interaction.response.send_message("✨ 2주(14일) 이상 미접속 멤버가 없습니다! 모든 멤버가 활동 중입니다.", ephemeral=True)
-        return
-    view = InactiveMembersView(interaction.guild, now.year, now.month, inactive_list)
-    embed = view.create_embed()
-    await interaction.response.send_message(embed=embed, view=view)
-
-
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.event
 async def on_message(message):
@@ -3982,18 +4199,6 @@ async def on_message(message):
         now = get_kst_now()
         embed = build_monthly_dashboard_embed(message.guild, now.year, now.month)
         view = MonthlyDashboardView(message.guild, now.year, now.month)
-        await message.channel.send(embed=embed, view=view)
-        return
-
-    # "!미접속자" 텍스트 명령어 대응
-    if message.content.strip() in ["!미접속자", "미접속자"]:
-        now = get_kst_now()
-        inactive_list = get_inactive_members(message.guild, days_threshold=14) if message.guild else []
-        if not inactive_list:
-            await message.channel.send("✨ 2주(14일) 이상 미접속 멤버가 없습니다! 모든 멤버가 활동 중입니다.")
-            return
-        view = InactiveMembersView(message.guild, now.year, now.month, inactive_list)
-        embed = view.create_embed()
         await message.channel.send(embed=embed, view=view)
         return
 
