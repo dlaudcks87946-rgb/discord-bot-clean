@@ -13,6 +13,7 @@ import sqlite3
 import psycopg2
 import time
 import datetime
+import calendar
 import random
 import re
 
@@ -855,6 +856,167 @@ def format_time(seconds):
     if secs > 0 or not parts:
         parts.append(f"{secs}초")
     return " ".join(parts)
+
+# ==========================================
+# [월간 활동 기록 및 미접속자 추적 헬퍼 함수]
+# ==========================================
+
+def get_month_date_range(year=None, month=None):
+    """특정 연월의 시작일(YYYY-MM-01)과 말일(YYYY-MM-LastDay) 반환"""
+    now = get_kst_now()
+    if year is None:
+        year = now.year
+    if month is None:
+        month = now.month
+    
+    _, last_day = calendar.monthrange(year, month)
+    start_date = f"{year:04d}-{month:02d}-01"
+    end_date = f"{year:04d}-{month:02d}-{last_day:02d}"
+    return start_date, end_date, year, month, last_day
+
+def get_monthly_voice_stats(year=None, month=None):
+    """특정 연월(1일~말일) 음성 이용 시간 통계 및 랭킹 집계"""
+    start_date, end_date, y, m, last_day = get_month_date_range(year, month)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        query = f"""
+        SELECT user_id, SUM(seconds) 
+        FROM voice_usage 
+        WHERE use_date >= {p} AND use_date <= {p} 
+        GROUP BY user_id
+        """
+        cursor.execute(query, (start_date, end_date))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        stats = {user_id: (int(secs) if secs is not None else 0) for user_id, secs in rows}
+        
+        # 현재 월인 경우 실시간 접속 세션 반영
+        now_kst = get_kst_now()
+        if y == now_kst.year and m == now_kst.month:
+            now_ts = time.time()
+            for uid, join_time in active_sessions.items():
+                active_duration = int(now_ts - join_time)
+                if active_duration > 0:
+                    stats[uid] = stats.get(uid, 0) + active_duration
+                    
+        sorted_stats = sorted(
+            [(uid, secs) for uid, secs in stats.items() if secs > 0],
+            key=lambda x: x[1],
+            reverse=True
+        )
+        total_seconds = sum(secs for _, secs in sorted_stats)
+        return {
+            "year": y,
+            "month": m,
+            "start_date": start_date,
+            "end_date": end_date,
+            "last_day": last_day,
+            "rankings": sorted_stats,
+            "total_users": len(sorted_stats),
+            "total_seconds": total_seconds
+        }
+    except Exception as e:
+        print(f"❌ 월간 통계 집계 오류: {e}")
+        return {
+            "year": y,
+            "month": m,
+            "start_date": start_date,
+            "end_date": end_date,
+            "last_day": last_day,
+            "rankings": [],
+            "total_users": 0,
+            "total_seconds": 0
+        }
+
+def get_available_months():
+    """DB에 기록된 음성 데이터가 존재하는 연월(YYYY-MM) 목록 반환 (최신순)"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT SUBSTR(use_date, 1, 7) FROM voice_usage ORDER BY 1 DESC")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        months = [r[0] for r in rows if r[0]]
+        current_ym = get_kst_now().strftime("%Y-%m")
+        if current_ym not in months:
+            months.insert(0, current_ym)
+        return months[:12]
+    except Exception as e:
+        print(f"❌ 가용 월 목록 조회 오류: {e}")
+        return [get_kst_now().strftime("%Y-%m")]
+
+def get_inactive_members(guild: discord.Guild, days_threshold: int = 14):
+    """
+    서버 멤버 중 지정일수(기본 14일/2주) 이상 음성 채널에 접속하지 않은 멤버 목록을
+    미접속 일수 내림차순(오래 안 들어온 순)으로 정렬하여 반환합니다.
+    """
+    if not guild:
+        return []
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT user_id, MAX(use_date) FROM voice_usage GROUP BY user_id")
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        
+        last_seen_map = {row[0]: row[1] for row in rows if row[1]}
+        
+        now_kst = get_kst_now()
+        today_date = now_kst.date()
+        kst_tz = datetime.timezone(datetime.timedelta(hours=9))
+        
+        inactive_list = []
+        
+        for member in guild.members:
+            if member.bot:
+                continue
+            
+            # 현재 음성 채널에 접속 중이면 미접속 0일
+            if member.id in active_sessions or (member.voice and member.voice.channel):
+                continue
+            
+            last_use_str = last_seen_map.get(member.id)
+            if last_use_str:
+                try:
+                    last_date = datetime.datetime.strptime(last_use_str, "%Y-%m-%d").date()
+                    inactive_days = (today_date - last_date).days
+                    has_record = True
+                except Exception:
+                    inactive_days = 0
+                    has_record = False
+            else:
+                # 음성 기록이 전혀 없는 유저는 서버 가입일 기준 계산
+                if member.joined_at:
+                    join_kst = member.joined_at.astimezone(kst_tz).date()
+                    inactive_days = (today_date - join_kst).days
+                    last_use_str = join_kst.strftime("%Y-%m-%d")
+                else:
+                    inactive_days = 999
+                    last_use_str = "기록 없음"
+                has_record = False
+            
+            if inactive_days >= days_threshold:
+                inactive_list.append({
+                    "member": member,
+                    "user_id": member.id,
+                    "inactive_days": inactive_days,
+                    "last_date_str": last_use_str,
+                    "has_record": has_record,
+                    "display_name": member.display_name
+                })
+                
+        # 미접속 일수 큰 순서대로 정렬
+        inactive_list.sort(key=lambda x: x["inactive_days"], reverse=True)
+        return inactive_list
+    except Exception as e:
+        print(f"❌ 미접속자 집계 오류: {e}")
+        return []
 
 
 # ==========================================
@@ -1958,6 +2120,294 @@ class VoiceUsagePanel(discord.ui.View):
         )
         view = DateSelectView(dates)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    @discord.ui.button(label="월간 기록 & 미접속자", style=discord.ButtonStyle.success, custom_id="check_voice_monthly_btn")
+    async def check_monthly(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now = get_kst_now()
+        embed = build_monthly_dashboard_embed(interaction.guild, now.year, now.month)
+        view = MonthlyDashboardView(interaction.guild, now.year, now.month)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+# ==========================================
+# [월간 활동 및 미접속자 프리미엄 대시보드 UI]
+# ==========================================
+
+def build_monthly_dashboard_embed(guild: discord.Guild, year: int, month: int):
+    """고급스러운 월간 활동 및 미접속자 통합 대시보드 Embed 생성"""
+    stats = get_monthly_voice_stats(year, month)
+    inactive_list = get_inactive_members(guild, days_threshold=14) if guild else []
+    
+    total_members = len([m for m in guild.members if not m.bot]) if guild else 0
+    active_users_count = stats["total_users"]
+    total_seconds = stats["total_seconds"]
+    
+    server_title = guild.name if guild else "HEAVEN"
+    embed = discord.Embed(
+        title=f"👑 【 {server_title} 】 {year}년 {month:02d}월 종합 활동 리포트",
+        description=(
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📅 **집계 대상 기간**: `{stats['start_date']} ~ {stats['end_date']}`\n"
+            f"💡 *매월 1일 00:00부터 말일 23:59까지의 기록이 자동으로 집계·보존됩니다.*"
+        ),
+        color=0x5865F2
+    )
+    
+    # 1. 월간 활동 통계 요약
+    avg_seconds = (total_seconds // active_users_count) if active_users_count > 0 else 0
+    active_rate = (active_users_count / total_members * 100) if total_members > 0 else 0
+    embed.add_field(
+        name="📊 월간 음성 활동 요약",
+        value=(
+            f"• **음성 참여 멤버**: `{active_users_count:,}명` / `{total_members:,}명` ({active_rate:.1f}%)\n"
+            f"• **총 이용 시간**: `{format_time(total_seconds)}`\n"
+            f"• **1인 평균 시간**: `{format_time(avg_seconds)}`"
+        ),
+        inline=False
+    )
+    
+    # 2. 월간 랭킹 TOP 5
+    top_5 = stats["rankings"][:5]
+    if top_5:
+        medals = ["🥇", "🥈", "🥉", "🎖️", "🎖️"]
+        top_lines = []
+        for idx, (uid, secs) in enumerate(top_5, 1):
+            medal = medals[idx-1] if idx <= len(medals) else f"`{idx}등`"
+            top_lines.append(f"{medal} **{idx}등** <@{uid}> — `{format_time(secs)}`")
+        embed.add_field(
+            name=f"🏆 {month}월 음성 랭킹 TOP 5",
+            value="\n".join(top_lines),
+            inline=False
+        )
+    else:
+        embed.add_field(
+            name=f"🏆 {month}월 음성 랭킹 TOP 5",
+            value="*해당 월에는 아직 기록된 음성 활동이 없습니다.*",
+            inline=False
+        )
+        
+    # 3. 2주 이상 미접속 멤버 요약
+    inactive_count = len(inactive_list)
+    inactive_rate = (inactive_count / total_members * 100) if total_members > 0 else 0
+    
+    inactive_preview = []
+    for item in inactive_list[:4]:
+        status_type = "최근 음성" if item["has_record"] else "가입일"
+        inactive_preview.append(
+            f"• **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
+        )
+    
+    preview_str = "\n".join(inactive_preview) if inactive_preview else "• *현재 2주(14일) 이상 미접속 멤버가 없습니다.*"
+    if inactive_count > 4:
+        preview_str += f"\n*... 외 {inactive_count - 4}명 (아래 [2주+ 미접속자 명단] 버튼으로 확인)*"
+        
+    embed.add_field(
+        name=f"🚨 2주(14일) 이상 미접속 멤버 ({inactive_count}명 / {inactive_rate:.1f}%)",
+        value=preview_str,
+        inline=False
+    )
+    
+    embed.set_footer(text=f"기준 시각: {get_kst_now().strftime('%Y-%m-%d %H:%M:%S')} (KST) • 매월 1일~말일 자동 갱신")
+    return embed
+
+
+class MonthDropdown(discord.ui.Select):
+    def __init__(self, guild, current_year, current_month):
+        self.guild = guild
+        months = get_available_months()
+        options = []
+        cur_val = f"{current_year:04d}-{current_month:02d}"
+        for ym in months:
+            y, m = ym.split("-")
+            label = f"{y}년 {int(m):02d}월 종합 기록"
+            options.append(discord.SelectOption(
+                label=label,
+                value=ym,
+                default=(ym == cur_val),
+                description=f"{y}년 {int(m):02d}월 1일 ~ 말일 활동 내역"
+            ))
+        super().__init__(
+            placeholder="조회할 연월을 선택하세요...",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_ym = self.values[0]
+        y, m = map(int, selected_ym.split("-"))
+        embed = build_monthly_dashboard_embed(self.guild, y, m)
+        view = MonthlyDashboardView(self.guild, y, m)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class MonthlyDashboardView(discord.ui.View):
+    def __init__(self, guild: discord.Guild, year: int, month: int):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.year = year
+        self.month = month
+        
+        self.add_item(MonthDropdown(guild, year, month))
+
+    @discord.ui.button(label="월간 랭킹 전체보기", style=discord.ButtonStyle.primary, emoji="🏆")
+    async def view_full_ranking(self, interaction: discord.Interaction, button: discord.ui.Button):
+        stats = get_monthly_voice_stats(self.year, self.month)
+        if not stats["rankings"]:
+            await interaction.response.send_message(f"⚠️ {self.year}년 {self.month}월에는 기록된 활동 랭킹이 없습니다.", ephemeral=True)
+            return
+        ranking_view = MonthlyRankingView(self.guild, self.year, self.month, stats["rankings"])
+        embed = ranking_view.create_embed()
+        await interaction.response.edit_message(embed=embed, view=ranking_view)
+
+    @discord.ui.button(label="2주+ 미접속자 명단", style=discord.ButtonStyle.danger, emoji="🚨")
+    async def view_inactive_members(self, interaction: discord.Interaction, button: discord.ui.Button):
+        inactive_list = get_inactive_members(self.guild, days_threshold=14) if self.guild else []
+        if not inactive_list:
+            await interaction.response.send_message("✨ 2주(14일) 이상 미접속 멤버가 없습니다! 모든 멤버가 활동 중입니다.", ephemeral=True)
+            return
+        inactive_view = InactiveMembersView(self.guild, self.year, self.month, inactive_list)
+        embed = inactive_view.create_embed()
+        await interaction.response.edit_message(embed=embed, view=inactive_view)
+
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.secondary, emoji="🔄")
+    async def refresh_dashboard(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = build_monthly_dashboard_embed(self.guild, self.year, self.month)
+        view = MonthlyDashboardView(self.guild, self.year, self.month)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class MonthlyRankingView(discord.ui.View):
+    def __init__(self, guild, year, month, rankings):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.year = year
+        self.month = month
+        self.rankings = rankings
+        self.current_page = 0
+        self.per_page = 15
+        self.total_pages = (len(rankings) - 1) // self.per_page + 1
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        
+        prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0))
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+
+        page_btn = discord.ui.Button(label=f"{self.current_page + 1} / {self.total_pages}", style=discord.ButtonStyle.secondary, disabled=True)
+        self.add_item(page_btn)
+
+        next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= self.total_pages - 1))
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+
+        back_btn = discord.ui.Button(label="🔙 대시보드로 돌아가기", style=discord.ButtonStyle.primary)
+        back_btn.callback = self.go_back
+        self.add_item(back_btn)
+
+    def create_embed(self):
+        embed = discord.Embed(
+            title=f"🏆 {self.year}년 {self.month:02d}월 음성 이용 시간 전체 랭킹",
+            description=f"총 활동 유저: **{len(self.rankings):,}명** (페이지 {self.current_page + 1}/{self.total_pages})",
+            color=0xFEE75C
+        )
+        start_idx = self.current_page * self.per_page
+        page_items = self.rankings[start_idx : start_idx + self.per_page]
+        
+        lines = []
+        for idx, (uid, secs) in enumerate(page_items, start_idx + 1):
+            lines.append(f"**{idx}등** <@{uid}> — `{format_time(secs)}`")
+            
+        embed.description = f"총 활동 유저: **{len(self.rankings):,}명**\n\n" + "\n".join(lines)
+        embed.set_footer(text=f"{self.year}년 {self.month:02d}월 종합 집계")
+        return embed
+
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def next_page(self, interaction: discord.Interaction):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def go_back(self, interaction: discord.Interaction):
+        embed = build_monthly_dashboard_embed(self.guild, self.year, self.month)
+        view = MonthlyDashboardView(self.guild, self.year, self.month)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class InactiveMembersView(discord.ui.View):
+    def __init__(self, guild, year, month, inactive_list):
+        super().__init__(timeout=300)
+        self.guild = guild
+        self.year = year
+        self.month = month
+        self.inactive_list = inactive_list
+        self.current_page = 0
+        self.per_page = 15
+        self.total_pages = (len(inactive_list) - 1) // self.per_page + 1 if inactive_list else 1
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.clear_items()
+        
+        prev_btn = discord.ui.Button(label="◀ 이전", style=discord.ButtonStyle.secondary, disabled=(self.current_page == 0))
+        prev_btn.callback = self.prev_page
+        self.add_item(prev_btn)
+
+        page_btn = discord.ui.Button(label=f"{self.current_page + 1} / {self.total_pages}", style=discord.ButtonStyle.secondary, disabled=True)
+        self.add_item(page_btn)
+
+        next_btn = discord.ui.Button(label="다음 ▶", style=discord.ButtonStyle.secondary, disabled=(self.current_page >= self.total_pages - 1))
+        next_btn.callback = self.next_page
+        self.add_item(next_btn)
+
+        back_btn = discord.ui.Button(label="🔙 대시보드로 돌아가기", style=discord.ButtonStyle.primary)
+        back_btn.callback = self.go_back
+        self.add_item(back_btn)
+
+    def create_embed(self):
+        embed = discord.Embed(
+            title="🚨 2주(14일) 이상 미접속 멤버 명단",
+            description=f"최근 14일 이상 음성 채널에 들어오지 않은 멤버 목록입니다.\n총 대상자: **{len(self.inactive_list):,}명** (페이지 {self.current_page + 1}/{self.total_pages})\n\n",
+            color=0xED4245
+        )
+        start_idx = self.current_page * self.per_page
+        page_items = self.inactive_list[start_idx : start_idx + self.per_page]
+        
+        lines = []
+        for idx, item in enumerate(page_items, start_idx + 1):
+            status_type = "최근 음성" if item["has_record"] else "가입일"
+            lines.append(
+                f"`{idx:02d}.` **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
+            )
+            
+        embed.description = f"최근 14일 이상 음성 채널 미접속 멤버 목록입니다.\n총 인원: **{len(self.inactive_list):,}명** (오래 안 들어온 순 정렬)\n\n" + "\n".join(lines)
+        embed.set_footer(text="닉네임 옆에 미접속 일수 및 최근 활동일(또는 가입일)이 표기됩니다.")
+        return embed
+
+    async def prev_page(self, interaction: discord.Interaction):
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def next_page(self, interaction: discord.Interaction):
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.create_embed(), view=self)
+
+    async def go_back(self, interaction: discord.Interaction):
+        embed = build_monthly_dashboard_embed(self.guild, self.year, self.month)
+        view = MonthlyDashboardView(self.guild, self.year, self.month)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
 # =========================
@@ -3455,6 +3905,49 @@ async def user_list_excel_error(interaction: discord.Interaction, error: app_com
     else:
         await interaction.response.send_message("❌ 명령어를 처리하는 중에 오류가 발생했습니다.", ephemeral=True)
 
+
+# =========================
+# 월간 활동 기록 & 미접속자 명령어
+# =========================
+@bot.tree.command(name="월간기록", description="매월 1일~말일 음성 활동 기록과 2주 이상 미접속자 현황을 조회합니다.")
+@app_commands.describe(조회월="조회할 연월 (예: 2026-09, 미입력 시 이번 달)")
+async def monthly_record(interaction: discord.Interaction, 조회월: str = None):
+    now = get_kst_now()
+    target_year = now.year
+    target_month = now.month
+    
+    if 조회월:
+        try:
+            cleaned = 조회월.strip().replace(".", "-").replace("/", "-")
+            parts = cleaned.split("-")
+            if len(parts) == 2:
+                target_year = int(parts[0])
+                target_month = int(parts[1])
+                if not (1 <= target_month <= 12):
+                    raise ValueError
+            else:
+                raise ValueError
+        except Exception:
+            await interaction.response.send_message("❌ 올바른 연월 형식이 아닙니다. (예: `2026-09` 또는 `2026.09`)", ephemeral=True)
+            return
+
+    embed = build_monthly_dashboard_embed(interaction.guild, target_year, target_month)
+    view = MonthlyDashboardView(interaction.guild, target_year, target_month)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+@bot.tree.command(name="미접속자", description="2주(14일) 이상 음성 채널에 접속하지 않은 멤버 목록과 미접속 일수를 조회합니다.")
+async def inactive_members_cmd(interaction: discord.Interaction):
+    now = get_kst_now()
+    inactive_list = get_inactive_members(interaction.guild, days_threshold=14) if interaction.guild else []
+    if not inactive_list:
+        await interaction.response.send_message("✨ 2주(14일) 이상 미접속 멤버가 없습니다! 모든 멤버가 활동 중입니다.", ephemeral=True)
+        return
+    view = InactiveMembersView(interaction.guild, now.year, now.month, inactive_list)
+    embed = view.create_embed()
+    await interaction.response.send_message(embed=embed, view=view)
+
+
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.event
 async def on_message(message):
@@ -3482,6 +3975,26 @@ async def on_message(message):
     if message.content.strip() in ["로또조회", "!로또조회", "내로또", "!내로또"]:
         embed = get_saved_lotto_tickets_embed(message.author.id)
         await message.channel.send(embed=embed)
+        return
+
+    # "!월간기록" 또는 "!활동기록" 텍스트 명령어 대응
+    if message.content.strip() in ["!월간기록", "월간기록", "!활동기록", "활동기록"]:
+        now = get_kst_now()
+        embed = build_monthly_dashboard_embed(message.guild, now.year, now.month)
+        view = MonthlyDashboardView(message.guild, now.year, now.month)
+        await message.channel.send(embed=embed, view=view)
+        return
+
+    # "!미접속자" 텍스트 명령어 대응
+    if message.content.strip() in ["!미접속자", "미접속자"]:
+        now = get_kst_now()
+        inactive_list = get_inactive_members(message.guild, days_threshold=14) if message.guild else []
+        if not inactive_list:
+            await message.channel.send("✨ 2주(14일) 이상 미접속 멤버가 없습니다! 모든 멤버가 활동 중입니다.")
+            return
+        view = InactiveMembersView(message.guild, now.year, now.month, inactive_list)
+        embed = view.create_embed()
+        await message.channel.send(embed=embed, view=view)
         return
 
     # "!상태패널" 텍스트 명령어 대응 (관리자용)
@@ -4042,5 +4555,10 @@ async def on_voice_state_update(member, before, after):
 
 
 # Run Flask server and start Discord bot
-keep_alive()
-bot.run(os.getenv("TOKEN"))
+if __name__ == "__main__":
+    keep_alive()
+    token = os.getenv("TOKEN")
+    if token:
+        bot.run(token)
+    else:
+        print("⚠️ TOKEN 환경변수가 설정되지 않았습니다.")
