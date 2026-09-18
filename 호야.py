@@ -954,6 +954,7 @@ def get_inactive_members(guild: discord.Guild, days_threshold: int = 14):
     """
     서버 멤버 중 지정일수(기본 14일/2주) 이상 음성 채널에 접속하지 않은 멤버 목록을
     미접속 일수 내림차순(오래 안 들어온 순)으로 정렬하여 반환합니다.
+    (중복 멤버 방지를 위해 고유 user_id 기준 필터링 적용)
     """
     if not guild:
         return []
@@ -965,17 +966,23 @@ def get_inactive_members(guild: discord.Guild, days_threshold: int = 14):
         cursor.close()
         conn.close()
         
-        last_seen_map = {row[0]: row[1] for row in rows if row[1]}
+        last_seen_map = {int(row[0]): row[1] for row in rows if row[0] is not None and row[1]}
         
         now_kst = get_kst_now()
         today_date = now_kst.date()
         kst_tz = datetime.timezone(datetime.timedelta(hours=9))
         
         inactive_list = []
+        seen_user_ids = set()
         
         for member in guild.members:
             if member.bot:
                 continue
+            
+            # 동일 유저 ID 중복 방지 (캐시/청크 중복 방지)
+            if member.id in seen_user_ids:
+                continue
+            seen_user_ids.add(member.id)
             
             # 현재 음성 채널에 접속 중이면 미접속 0일
             if member.id in active_sessions or (member.voice and member.voice.channel):
@@ -1005,14 +1012,15 @@ def get_inactive_members(guild: discord.Guild, days_threshold: int = 14):
                 inactive_list.append({
                     "member": member,
                     "user_id": member.id,
+                    "username": member.name,
+                    "display_name": member.display_name,
                     "inactive_days": inactive_days,
                     "last_date_str": last_use_str,
-                    "has_record": has_record,
-                    "display_name": member.display_name
+                    "has_record": has_record
                 })
                 
-        # 미접속 일수 큰 순서대로 정렬
-        inactive_list.sort(key=lambda x: x["inactive_days"], reverse=True)
+        # 미접속 일수 큰 순서대로 정렬 (일수가 같으면 닉네임 오름차순 정렬)
+        inactive_list.sort(key=lambda x: (-x["inactive_days"], x["display_name"]))
         return inactive_list
     except Exception as e:
         print(f"❌ 미접속자 집계 오류: {e}")
@@ -2138,7 +2146,7 @@ def build_monthly_dashboard_embed(guild: discord.Guild, year: int, month: int):
     stats = get_monthly_voice_stats(year, month)
     inactive_list = get_inactive_members(guild, days_threshold=14) if guild else []
     
-    total_members = len([m for m in guild.members if not m.bot]) if guild else 0
+    total_members = len({m.id for m in guild.members if not m.bot}) if guild else 0
     active_users_count = stats["total_users"]
     total_seconds = stats["total_seconds"]
     
@@ -2193,8 +2201,11 @@ def build_monthly_dashboard_embed(guild: discord.Guild, year: int, month: int):
     inactive_preview = []
     for item in inactive_list[:4]:
         status_type = "최근 음성" if item["has_record"] else "가입일"
+        name_tag = f"**{item['display_name']}**"
+        if item.get("username") and item["username"] != item["display_name"]:
+            name_tag += f" `(@{item['username']})`"
         inactive_preview.append(
-            f"• **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
+            f"• {name_tag} (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
         )
     
     preview_str = "\n".join(inactive_preview) if inactive_preview else "• *현재 2주(14일) 이상 미접속 멤버가 없습니다.*"
@@ -2362,9 +2373,10 @@ class InactiveSelect(discord.ui.Select):
             if guild and (m == guild.owner or (me and me.top_role <= m.top_role)):
                 can_kick = False
                 
-            label = f"{prefix}{item['display_name']} ({item['inactive_days']}일 미접속)"
+            username_str = f" (@{item['username']})" if item.get("username") and item["username"] != item["display_name"] else ""
+            label = f"{prefix}{item['display_name']}{username_str} ({item['inactive_days']}일 미접속)"
             if not can_kick:
-                label = f"🔒 {item['display_name']} (관리자/보호)"
+                label = f"🔒 {item['display_name']}{username_str} (관리자/보호)"
             label = label[:100]
             
             desc = f"ID: {uid} | 최근: {item['last_date_str']}"
@@ -2442,28 +2454,32 @@ class InactiveKickConfirmView(discord.ui.View):
         
         success_list = []
         fail_list = []
+        success_uids = set()
         
         me = self.guild.me
         for item in self.selected_targets:
             m = item["member"]
+            uid = item["user_id"]
             display_name = item["display_name"]
             inactive_days = item["inactive_days"]
+            username_str = f" (@{item['username']})" if item.get("username") and item["username"] != display_name else ""
             
             if m == self.guild.owner:
-                fail_list.append(f"{display_name} - 서버 소유자")
+                fail_list.append(f"{display_name}{username_str} - 서버 소유자")
                 continue
             if me and me.top_role <= m.top_role:
-                fail_list.append(f"{display_name} - 봇보다 상위 역할")
+                fail_list.append(f"{display_name}{username_str} - 봇보다 상위 역할")
                 continue
                 
             try:
                 await m.kick(reason=f"관리자 {self.admin_user.name}에 의한 2주 이상 미접속 멤버 정리 ({inactive_days}일 미접속)")
-                success_list.append(f"{display_name} ({inactive_days}일 미접속)")
+                success_list.append(f"{display_name}{username_str} ({inactive_days}일 미접속)")
+                success_uids.add(uid)
                 await asyncio.sleep(1.0)
             except discord.Forbidden:
-                fail_list.append(f"{display_name} - 권한 부족")
+                fail_list.append(f"{display_name}{username_str} - 권한 부족")
             except Exception as e:
-                fail_list.append(f"{display_name} - {str(e)}")
+                fail_list.append(f"{display_name}{username_str} - {str(e)}")
                 
         result_embed = discord.Embed(
             title="✅ 미접속 멤버 일괄 추방 완료",
@@ -2484,7 +2500,6 @@ class InactiveKickConfirmView(discord.ui.View):
                 fail_str += f"\n... 외 {len(fail_list) - 20}명"
             result_embed.add_field(name="🔴 실패 유저 목록 (권한 부족 등)", value=f"```\n{fail_str}\n```", inline=False)
 
-        success_uids = {t["user_id"] for t in self.selected_targets if any(t["display_name"] in s for s in success_list)}
         updated_inactive = [it for it in self.inactive_list if it["user_id"] not in success_uids]
         
         back_view = discord.ui.View(timeout=180)
@@ -2565,8 +2580,11 @@ class InactiveMembersView(discord.ui.View):
         for idx, item in enumerate(page_items, start_idx + 1):
             status_type = "최근 음성" if item["has_record"] else "가입일"
             is_sel = "☑️ " if item["user_id"] in self.selected_ids else ""
+            name_tag = f"**{item['display_name']}**"
+            if item.get("username") and item["username"] != item["display_name"]:
+                name_tag += f" `(@{item['username']})`"
             lines.append(
-                f"{is_sel}`{idx:02d}.` **{item['display_name']}** (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
+                f"{is_sel}`{idx:02d}.` {name_tag} (<@{item['user_id']}>) ➔ ⚠️ **{item['inactive_days']}일 미접속** `({status_type}: {item['last_date_str']})`"
             )
             
         desc = (
@@ -2628,7 +2646,12 @@ class InactiveMembersView(discord.ui.View):
             color=0xED4245
         )
         
-        target_lines = [f"• **{t['display_name']}** (<@{t['user_id']}>) — **{t['inactive_days']}일 미접속**" for t in targets]
+        target_lines = []
+        for t in targets:
+            name_tag = f"**{t['display_name']}**"
+            if t.get("username") and t["username"] != t["display_name"]:
+                name_tag += f" `(@{t['username']})`"
+            target_lines.append(f"• {name_tag} (<@{t['user_id']}>) — **{t['inactive_days']}일 미접속**")
         target_str = "\n".join(target_lines)
         if len(target_str) > 1024:
             target_str = target_str[:1000] + "\n... 외 다수"
