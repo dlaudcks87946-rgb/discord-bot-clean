@@ -1918,7 +1918,7 @@ intents.voice_states = True
 intents.members = True
 
 # Bot initialization
-bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
+bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents)
 
 class PassRankingView(discord.ui.View):
     def __init__(self, full_rows):
@@ -3304,16 +3304,23 @@ async def on_ready():
         lotto_check_loop.start()
         print("⏰ 주간 로또 당첨 결과 자동 정산 루프 시작 완료")
 
+    print("🚀 모든 백그라운드 태스크 및 영구 뷰 등록 완료! (명령어 동기화는 '!동기화'로 수동 실행 가능)")
+
+
+# =========================
+# 수동 동기화 명령어 (Cloudflare 차단 방지)
+# =========================
+@bot.command(name="동기화")
+@commands.has_permissions(administrator=True)
+async def sync_commands(ctx):
+    """관리자 전용: 새로운 슬래시 명령어를 추가했을 때만 수동으로 동기화합니다."""
+    msg = await ctx.send("🔄 슬래시 명령어 동기화 중입니다. 잠시만 기다려주세요...")
     try:
-        # 기존에 복사 등록되어 중복 노출을 유발하던 길드 명령어들을 삭제합니다.
-        for guild in bot.guilds:
-            bot.tree.clear_commands(guild=guild)
-            await bot.tree.sync(guild=guild)
-        # 이제 글로벌 명령어로만 1개 노출되도록 동기화합니다.
-        await bot.tree.sync()
-        print("✅ 글로벌 슬래시 명령어 동기화 및 길드 중복 제거 완료")
+        synced = await bot.tree.sync()
+        await msg.edit(content=f"✅ 총 {len(synced)}개의 슬래시 명령어가 성공적으로 동기화되었습니다!")
+        print(f"✅ 관리자({ctx.author}) 요청으로 슬래시 명령어 {len(synced)}개 동기화 완료")
     except Exception as e:
-        print(f"❌ 슬래시 명령어 동기화 오류: {e}")
+        await msg.edit(content=f"❌ 동기화 중 오류 발생: {e}")
 
 
 # =========================
