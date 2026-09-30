@@ -2979,6 +2979,75 @@ class ShopPanelView(discord.ui.View):
         await interaction.response.send_message("구매할 개수를 선택해주세요.", view=view, ephemeral=True)
 
 
+def format_clean_nickname(current_nick: str, target_status: str = "auto") -> str:
+    """
+    닉네임에서 상태 태그([관전], [대기])와 레벨 태그([Lv3], [LV2] 등)를 분석하여
+    중복된 낮은 레벨을 제거하고, 상태 태그와 최고 레벨을 깔끔하게 정렬한 닉네임을 반환합니다.
+    target_status:
+        - "관전": [관전] 상태 부여
+        - "대기": [대기] 상태 부여
+        - "none" / None: 상태 태그 제거 (원래대로)
+        - "auto": 기존 닉네임에 있던 상태 태그 유지
+    """
+    if not current_nick:
+        return current_nick
+
+    # 1. 상태 판별 (auto인 경우 기존 상태 유지)
+    has_spectate = "[관전]" in current_nick
+    has_wait = "[대기]" in current_nick
+
+    if target_status == "auto":
+        if has_spectate:
+            status_prefix = "[관전]"
+        elif has_wait:
+            status_prefix = "[대기]"
+        else:
+            status_prefix = None
+    elif target_status in ("관전", "[관전]"):
+        status_prefix = "[관전]"
+    elif target_status in ("대기", "[대기]"):
+        status_prefix = "[대기]"
+    else:
+        status_prefix = None
+
+    # 2. 상태 태그 제거
+    text = re.sub(r'\[(관전|대기)\]\s*', '', current_nick)
+
+    # 3. 레벨 태그 추출 ([Lv3], [LV2], [Lv.3], [lv 3] 등)
+    level_pattern = r'\[(?:[Ll][Vv]|레벨)\.?\s*(\d+)\]'
+    level_matches = list(re.finditer(level_pattern, text))
+
+    best_level_num = None
+    if level_matches:
+        levels = []
+        for m in level_matches:
+            try:
+                lv_num = int(m.group(1))
+                levels.append(lv_num)
+            except ValueError:
+                pass
+        if levels:
+            best_level_num = max(levels)
+
+        # 텍스트에서 모든 레벨 태그 제거
+        text = re.sub(level_pattern, '', text)
+
+    # 4. 순수 닉네임 정리 (다중 공백 제거 및 트림)
+    pure_name = re.sub(r'\s+', ' ', text).strip()
+
+    # 5. 최종 닉네임 조합
+    parts = []
+    if status_prefix:
+        parts.append(status_prefix)
+    if best_level_num is not None:
+        parts.append(f"[Lv{best_level_num}]")
+    if pure_name:
+        parts.append(pure_name)
+
+    final_nick = " ".join(parts).strip()
+    return final_nick[:32]
+
+
 class StatusNicknameView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -2992,15 +3061,7 @@ class StatusNicknameView(discord.ui.View):
                 return
 
             current_name = member.nick or member.name
-            clean_name = current_name
-            # 기존 접두사 제거
-            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-            for prefix in prefixes:
-                if clean_name.startswith(prefix):
-                    clean_name = clean_name[len(prefix):]
-                    break
-            clean_name = clean_name.strip()
-            new_nick = f"[관전] {clean_name}"[:32]
+            new_nick = format_clean_nickname(current_name, target_status="관전")
 
             try:
                 await member.edit(nick=new_nick)
@@ -3030,15 +3091,7 @@ class StatusNicknameView(discord.ui.View):
                 return
 
             current_name = member.nick or member.name
-            clean_name = current_name
-            # 기존 접두사 제거
-            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-            for prefix in prefixes:
-                if clean_name.startswith(prefix):
-                    clean_name = clean_name[len(prefix):]
-                    break
-            clean_name = clean_name.strip()
-            new_nick = f"[대기] {clean_name}"[:32]
+            new_nick = format_clean_nickname(current_name, target_status="대기")
 
             try:
                 await member.edit(nick=new_nick)
@@ -3068,16 +3121,9 @@ class StatusNicknameView(discord.ui.View):
                 return
 
             current_name = member.nick or member.name
-            clean_name = current_name
-            # 기존 접두사 제거
-            prefixes = ["[관전] ", "[대기] ", "[관전]", "[대기]"]
-            for prefix in prefixes:
-                if clean_name.startswith(prefix):
-                    clean_name = clean_name[len(prefix):]
-                    break
-            clean_name = clean_name.strip()
+            clean_name = format_clean_nickname(current_name, target_status="none")
 
-            # 닉네임을 원래대로 돌리려면, 닉네임이 member.name과 같으면 nick=None을 설정하는 것이 좋음
+            # 닉네임을 원래대로 돌리려면, 닉네임이 member.name과 같으면 nick=None을 설정
             new_nick = None if clean_name == member.name else clean_name
             if new_nick is not None:
                 new_nick = new_nick[:32]
@@ -3665,8 +3711,8 @@ async def split_teams(interaction: discord.Interaction, team_size: int = 5):
         return
         
     all_members = [m for m in hub_channel.members if not m.bot]
-    active_members = [m for m in all_members if not m.display_name.startswith("[관전]")]
-    spectator_members = [m for m in all_members if m.display_name.startswith("[관전]")]
+    active_members = [m for m in all_members if "[관전]" not in m.display_name]
+    spectator_members = [m for m in all_members if "[관전]" in m.display_name]
     
     if not active_members:
         await interaction.response.send_message("❌ 대상 대기방 채널에 플레이어가 없습니다. (관전자만 있는 경우 팀을 나눌 수 없습니다.)", ephemeral=True)
@@ -4281,9 +4327,8 @@ async def on_message(message):
             await message.reply("❌ 대상 카테고리를 찾을 수 없습니다.", delete_after=5)
             return
             
-        all_members = [m for m in hub_channel.members if not m.bot]
-        active_members = [m for m in all_members if not m.display_name.startswith("[관전]")]
-        spectator_members = [m for m in all_members if m.display_name.startswith("[관전]")]
+        active_members = [m for m in hub_channel.members if not m.bot and "[관전]" not in m.display_name]
+        spectator_members = [m for m in hub_channel.members if not m.bot and "[관전]" in m.display_name]
         
         if not active_members:
             await message.reply("❌ 대상 대기방 채널에 플레이어가 없습니다. (관전자만 있는 경우 팀을 나눌 수 없습니다.)", delete_after=5)
@@ -4676,6 +4721,42 @@ async def on_member_join(member):
         conn.close()
     except Exception as e:
         print(f"❌ 입장 확인 중 오류 발생: {e}")
+
+
+# 닉네임 실시간 자동 정리 이벤트 (레벨 중복 제거 및 관전/대기 태그 정돈)
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    # 봇 자신의 변경이나 다른 봇은 무시
+    if after.bot:
+        return
+
+    # 닉네임 변경이 없거나 닉네임이 없으면 무시
+    if before.nick == after.nick or not after.nick:
+        return
+
+    # 레벨 태그 패턴 ([Lv3], [LV2], [Lv.3], [레벨 3] 등)
+    level_pattern = r'\[(?:[Ll][Vv]|레벨)\.?\s*(\d+)\]'
+    level_matches = re.findall(level_pattern, after.nick)
+
+    # 1) 레벨 태그가 2개 이상이거나
+    # 2) [관전] 또는 [대기]가 들어있는데 맨 앞에 오지 않은 경우 자동 정리 대상
+    needs_cleanup = False
+    if len(level_matches) > 1:
+        needs_cleanup = True
+    elif ("[관전]" in after.nick and not after.nick.startswith("[관전]")) or ("[대기]" in after.nick and not after.nick.startswith("[대기]")):
+        needs_cleanup = True
+
+    if needs_cleanup:
+        cleaned_nick = format_clean_nickname(after.nick, target_status="auto")
+        if cleaned_nick and cleaned_nick != after.nick:
+            try:
+                await after.edit(nick=cleaned_nick)
+                print(f"🧹 [실시간 닉네임 정리] {after.guild.name} / {after.name}: '{after.nick}' -> '{cleaned_nick}'")
+            except discord.Forbidden:
+                pass
+            except Exception as e:
+                print(f"❌ 닉네임 자동 정리 오류 ({after.name}): {e}")
+
 
 # 동적 음성 채널 생성 이벤트
 @bot.event
