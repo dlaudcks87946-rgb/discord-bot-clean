@@ -3319,6 +3319,9 @@ async def daily_reset_task():
 async def on_ready():
     print(f"✅ 로그인 성공: {bot.user.name} ({bot.user.id})")
     
+    # 0. 활성 게임 세션 상태 동기화 (이미 삭제되었거나 비어있는 방 세션 정리)
+    sync_active_game_sessions()
+
     # 1. 영구 뷰 등록
     bot.add_view(VoiceUsagePanel())
 #     bot.add_view(PassPanelView())
@@ -4974,9 +4977,24 @@ def end_game_session(channel_id: int):
             print(f"🏁 [게임 세션 종료] #{sess['channel_name']} (플레이 시간: {duration_min}분)")
         else:
             if DATABASE_URL:
-                cursor.execute("UPDATE voice_game_sessions SET end_time = %s, is_active = 0 WHERE channel_id = %s AND is_active = 1", (end_time, channel_id))
+                cursor.execute("SELECT session_id, start_time, session_date FROM voice_game_sessions WHERE channel_id = %s AND is_active = 1", (channel_id,))
             else:
-                cursor.execute("UPDATE voice_game_sessions SET end_time = ?, is_active = 0 WHERE channel_id = ? AND is_active = 1", (end_time, channel_id))
+                cursor.execute("SELECT session_id, start_time, session_date FROM voice_game_sessions WHERE channel_id = ? AND is_active = 1", (channel_id,))
+            rows = cursor.fetchall()
+            for r in rows:
+                sid, stime_str, sdate_str = r
+                dur_min = 1
+                try:
+                    st_dt = datetime.datetime.strptime(f"{sdate_str} {stime_str}", "%Y-%m-%d %H:%M:%S")
+                    st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+                    dur_min = max(1, int((now_kst - st_dt).total_seconds()) // 60)
+                except Exception:
+                    dur_min = 1
+                if DATABASE_URL:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                else:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
+                print(f"🏁 [게임 세션 복구 종료] 세션ID {sid} (플레이 시간: {dur_min}분)")
                 
         conn.commit()
         cursor.close()
@@ -4984,117 +5002,55 @@ def end_game_session(channel_id: int):
     except Exception as e:
         print(f"❌ [게임 세션 종료 오류] {e}")
 
+def sync_active_game_sessions():
+    """봇에 연결된 실제 디스코드 음성 채널 상태를 조회하여, 이미 삭제되었거나 멤버가 0명인 유령 세션을 자동 종료합니다."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT session_id, channel_id, start_time, session_date FROM voice_game_sessions WHERE is_active = 1")
+        active_rows = cursor.fetchall()
+        now_kst = get_kst_now()
+        end_time = now_kst.strftime("%H:%M:%S")
+
+        for row in active_rows:
+            sid, ch_id, stime_str, sdate_str = row
+            channel = bot.get_channel(ch_id)
+            # 채널이 디스코드 상에서 삭제되었거나, 음성 채널에 아무도 없는 경우 즉시 세션 종료
+            if channel is None or (hasattr(channel, 'members') and len(channel.members) == 0):
+                dur_min = 1
+                try:
+                    st_dt = datetime.datetime.strptime(f"{sdate_str} {stime_str}", "%Y-%m-%d %H:%M:%S")
+                    st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+                    dur_min = max(1, int((now_kst - st_dt).total_seconds()) // 60)
+                except Exception:
+                    dur_min = 1
+                if DATABASE_URL:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                else:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
+                active_game_sessions.pop(ch_id, None)
+                print(f"🧹 [유령 세션 자동 종료] 세션ID {sid} (채널 {ch_id} 부재/비어있음, {dur_min}분 기록)")
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ [활성 세션 동기화 오류] {e}")
+
 async def send_voice_log_embed(embed: discord.Embed):
-    # 채널 1518304536136253674로의 실시간 로그 전송 비활성화 (기록은 DB에 저장되어 /음성캘린더 로만 확인)
     return
 
 async def log_voice_channel_created(channel: discord.VoiceChannel, creator: discord.Member = None, category: discord.CategoryChannel = None):
-    try:
-        creator_nick = creator.display_name if creator else "알 수 없음"
-        embed = discord.Embed(
-            title="🔊 음성 채널 생성",
-            description=f"{channel.mention} 채널이 생성되었습니다.",
-            color=0x2ECC71,  # 산뜻한 녹색
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        if creator:
-            embed.set_author(name=f"{creator.display_name} ({creator.name})", icon_url=creator.display_avatar.url)
-            embed.add_field(name="👑 방장 (생성자)", value=f"**{creator_nick}** ({creator.mention})", inline=True)
-        else:
-            embed.add_field(name="👑 방장 (생성자)", value="`알 수 없음`", inline=True)
-            
-        embed.add_field(name="🏷️ 생성된 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
-        if category:
-            embed.add_field(name="📂 카테고리", value=f"`{category.name}`", inline=True)
-        
-        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
-        await send_voice_log_embed(embed)
-    except Exception as e:
-        print(f"❌ [음성 채널 생성 로그 오류] {e}")
+    return
 
 async def log_voice_channel_join(member: discord.Member, channel: discord.VoiceChannel, before_channel: discord.VoiceChannel = None):
-    try:
-        is_move = before_channel is not None
-        member_nick = member.display_name
-        if not is_move:
-            title = "📥 음성 채널 입장"
-            desc = f"**{member_nick}** 님이 음성 채널에 입장했습니다."
-            color = 0x3498DB  # 선명한 파란색
-        else:
-            title = "🔀 음성 채널 이동"
-            desc = f"**{member_nick}** 님이 다른 음성 채널로 이동했습니다."
-            color = 0xE67E22  # 주황색
-
-        embed = discord.Embed(
-            title=title,
-            description=desc,
-            color=color,
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
-        embed.add_field(name="👤 닉네임", value=f"**{member_nick}** ({member.mention})", inline=True)
-        
-        if not is_move:
-            embed.add_field(name="🔊 입장 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
-        else:
-            embed.add_field(name="🚪 이전 채널", value=f"{before_channel.mention}\n`{before_channel.name}`", inline=True)
-            embed.add_field(name="🔊 이동 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
-
-        embed.add_field(name="👥 현재 인원", value=f"`{len(channel.members)}명`", inline=True)
-        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
-        await send_voice_log_embed(embed)
-    except Exception as e:
-        print(f"❌ [음성 채널 입장 로그 오류] {e}")
+    return
 
 async def handle_voice_status_update(channel_id: int, new_status: str, guild_id: int = None):
     try:
-        # 게임 세션 상태메시지 갱신
+        # 게임 세션 상태메시지만 갱신 (채널 실시간 메시지 발송은 완전 비활성화)
         update_session_status(channel_id, new_status)
-        
-        await asyncio.sleep(0.8)
-        channel = bot.get_channel(channel_id)
-        guild = channel.guild if channel and hasattr(channel, "guild") else None
-        if not guild and guild_id:
-            guild = bot.get_guild(int(guild_id))
-            if guild and not channel:
-                channel = guild.get_channel(channel_id)
-                
-        updater = None
-        if guild and guild.me.guild_permissions.view_audit_log:
-            try:
-                async for entry in guild.audit_logs(limit=5):
-                    if entry.action.value == 192 or str(entry.action).lower() == "voice_channel_status_update":
-                        target_id = entry.target.id if entry.target else None
-                        if target_id == channel_id:
-                            diff = (discord.utils.utcnow() - entry.created_at).total_seconds()
-                            if diff < 15:
-                                updater = entry.user
-                                break
-            except Exception:
-                pass
-
-        channel_mention = channel.mention if channel else f"<#{channel_id}>"
-        channel_name = channel.name if channel else f"ID: {channel_id}"
-
-        embed = discord.Embed(
-            title="💬 음성 채널 상태메시지 변경",
-            description=f"{channel_mention} 의 게임/상태메시지가 변경되었습니다.",
-            color=0x9B59B6,  # 보라색
-            timestamp=datetime.datetime.now(datetime.timezone.utc)
-        )
-        if updater:
-            embed.set_author(name=f"{updater.display_name} ({updater.name})", icon_url=updater.display_avatar.url)
-            embed.add_field(name="👤 변경자", value=f"**{updater.display_name}** ({updater.mention})", inline=True)
-            
-        embed.add_field(name="🔊 음성 채널", value=f"{channel_mention}\n`{channel_name}`", inline=True)
-        
-        status_display = f"🎮 **{new_status}**" if (new_status and new_status.strip()) else "*(상태메시지가 삭제됨)*"
-        embed.add_field(name="🏷️ 변경된 게임/상태", value=status_display, inline=False)
-        
-        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
-        await send_voice_log_embed(embed)
     except Exception as e:
-        print(f"❌ [상태메시지 로깅 오류] {e}")
+        print(f"❌ [상태메시지 갱신 오류] {e}")
 
 # [방법 A] 웹소켓 원시 이벤트 수신을 통한 음성 채널 상태메시지 감지
 @bot.event
@@ -5212,6 +5168,7 @@ def get_date_game_sessions(date_str: str) -> list:
     """특정 날짜의 게임 파티/세션 목록을 조회합니다."""
     try:
         clean_invalid_bot_sessions()
+        sync_active_game_sessions()
         conn = get_db_connection()
         cursor = conn.cursor()
         bot_id = bot.user.id if bot.user else 0
@@ -5255,20 +5212,21 @@ def draw_rounded_rect(draw, xy, radius, fill=None, outline=None, width=1):
 
 def generate_party_card_image(date_str: str, sessions: list, page: int, max_page: int, total_count: int) -> io.BytesIO:
     width = 980
-    header_height = 100
-    card_height = 180
+    header_height = 95
+    card_height = 205
     card_gap = 16
     num_cards = max(1, len(sessions))
-    height = header_height + (card_height + card_gap) * num_cards + 50
+    height = header_height + (card_height + card_gap) * num_cards + 45
 
     img = Image.new("RGBA", (width, height), (18, 20, 26, 255))
     draw = ImageDraw.Draw(img)
 
-    title_font = get_calendar_font("NanumGothic-Bold.ttf", 26)
+    title_font = get_calendar_font("NanumGothic-Bold.ttf", 25)
     sub_font = get_calendar_font("NanumGothic-Regular.ttf", 15)
-    game_title_font = get_calendar_font("NanumGothic-Bold.ttf", 21)
+    channel_font = get_calendar_font("NanumGothic-Bold.ttf", 20)
+    game_font = get_calendar_font("NanumGothic-Bold.ttf", 16)
     meta_font = get_calendar_font("NanumGothic-Regular.ttf", 15)
-    host_font = get_calendar_font("NanumGothic-Bold.ttf", 16)
+    host_font = get_calendar_font("NanumGothic-Bold.ttf", 15)
     badge_font = get_calendar_font("NanumGothic-Bold.ttf", 14)
     footer_font = get_calendar_font("NanumGothic-Regular.ttf", 13)
 
@@ -5276,20 +5234,20 @@ def generate_party_card_image(date_str: str, sessions: list, page: int, max_page
     draw.rectangle([0, 0, width, height], fill=(18, 20, 26))
 
     # 상단 헤더 박스
-    draw_rounded_rect(draw, [24, 18, width - 24, 88], radius=12, fill=(28, 33, 44), outline=(46, 54, 72), width=1)
+    draw_rounded_rect(draw, [24, 16, width - 24, 84], radius=12, fill=(28, 33, 44), outline=(46, 54, 72), width=1)
 
     y, m, d = date_str.split("-")
     header_title = f"{y}년 {int(m)}월 {int(d)}일 파티 활동 카드"
-    draw.text((45, 30), header_title, font=title_font, fill=(255, 255, 255))
+    draw.text((45, 28), header_title, font=title_font, fill=(255, 255, 255))
 
     info_text = f"총 {total_count}개 세션  |  페이지 {page + 1}/{max_page + 1}"
-    draw.text((width - 45 - 240, 38), info_text, font=sub_font, fill=(158, 172, 194))
+    draw.text((width - 45 - 240, 36), info_text, font=sub_font, fill=(158, 172, 194))
 
     curr_y = header_height + 10
 
     if not sessions:
         draw_rounded_rect(draw, [24, curr_y, width - 24, curr_y + 130], radius=12, fill=(28, 33, 44))
-        draw.text((width // 2 - 140, curr_y + 50), "진행된 게임 세션이 없습니다.", font=game_title_font, fill=(160, 174, 196))
+        draw.text((width // 2 - 140, curr_y + 50), "진행된 게임 세션이 없습니다.", font=channel_font, fill=(160, 174, 196))
     else:
         for idx, sess in enumerate(sessions):
             sid, cname, catname, creator_nick, status_msg, stime, etime, duration, parts_json, is_active = sess
@@ -5305,18 +5263,26 @@ def generate_party_card_image(date_str: str, sessions: list, page: int, max_page
             accent_color = (46, 204, 113) if is_active else (88, 101, 242)
             draw_rounded_rect(draw, [24, top, 34, bottom], radius=4, fill=accent_color)
 
-            # 파티 번호 뱃지
+            # 1행: 파티 번호 뱃지 + 채널 이름 (방 이름 표시)
             p_num = f"PARTY #{idx + 1 + page * 3}"
-            draw_rounded_rect(draw, [50, top + 18, 138, top + 42], radius=6, fill=(40, 48, 66))
-            draw.text((60, top + 22), p_num, font=badge_font, fill=(120, 180, 255))
+            draw_rounded_rect(draw, [50, top + 16, 138, top + 40], radius=6, fill=(40, 48, 66))
+            draw.text((60, top + 20), p_num, font=badge_font, fill=(120, 180, 255))
 
-            # 게임 제목 / 상태 메시지
-            game_title = status_msg if status_msg and status_msg != "설정된 상태메시지 없음" else cname
-            if len(game_title) > 34:
-                game_title = game_title[:32] + "..."
-            draw.text((150, top + 18), game_title, font=game_title_font, fill=(255, 255, 255))
+            # 채널 이름 정제 및 표시 (이모지가 폰트에 없어도 텍스트가 시원하게 보이도록)
+            clean_cname = cname.replace("・", " ").strip()
+            ch_name_text = clean_cname if len(clean_cname) <= 30 else clean_cname[:28] + ".."
+            draw.text((150, top + 16), ch_name_text, font=channel_font, fill=(255, 255, 255))
 
-            # 플레이 시간 및 상태
+            # 2행: 게임 / 상태메시지
+            has_custom_status = status_msg and status_msg.strip() not in ["", "상태메시지 없음", "설정된 상태메시지 없음"]
+            if has_custom_status:
+                status_display = status_msg if len(status_msg) <= 38 else status_msg[:36] + ".."
+                draw.text((50, top + 50), "🎮 게임/상태 :", font=meta_font, fill=(160, 172, 192))
+                draw.text((165, top + 49), status_display, font=game_font, fill=(240, 246, 255))
+            else:
+                draw.text((50, top + 50), "🎮 게임/상태 : (설정된 게임 또는 상태메시지 없음)", font=meta_font, fill=(130, 140, 160))
+
+            # 3행: 플레이 시간 및 상태
             if is_active:
                 status_text = f"시작: {stime} ~ 현재 진행 중 (LIVE)"
                 status_color = (46, 204, 113)
@@ -5325,11 +5291,11 @@ def generate_party_card_image(date_str: str, sessions: list, page: int, max_page
                 status_text = f"플레이 시간: {stime} ~ {etime}  ({dur_text})"
                 status_color = (175, 188, 208)
 
-            draw.text((50, top + 56), status_text, font=meta_font, fill=status_color)
+            draw.text((50, top + 80), status_text, font=meta_font, fill=status_color)
 
-            # 방장 라벨
-            draw.text((50, top + 86), "방장 (HOST) :", font=meta_font, fill=(160, 172, 192))
-            draw.text((152, top + 85), f"👑 {creator_nick}", font=host_font, fill=(255, 215, 0))
+            # 4행: 방장 라벨 (호스트 닉네임 짤림 방지)
+            draw.text((50, top + 110), "방장 (HOST) :", font=meta_font, fill=(160, 172, 192))
+            draw.text((155, top + 109), f"👑 {creator_nick}", font=host_font, fill=(255, 215, 0))
 
             # 참가자 목록 파싱
             nick_list = []
@@ -5341,15 +5307,16 @@ def generate_party_card_image(date_str: str, sessions: list, page: int, max_page
             if not nick_list:
                 nick_list = [creator_nick]
 
-            # 참가 멤버 알약 뱃지들
+            # 5행: 참가 멤버 알약 뱃지들 (닉네임 최대 16자까지 확장)
             badge_x = 50
-            badge_y = top + 124
+            badge_y = top + 145
             m_label = f"참여 멤버 ({len(nick_list)}) :"
             draw.text((badge_x, badge_y + 4), m_label, font=meta_font, fill=(160, 172, 192))
             badge_x += 125
 
             for nick in nick_list[:6]:
-                n_text = nick if len(nick) <= 8 else nick[:7] + ".."
+                # 닉네임 짤림 방지: 최대 16자까지 여유 있게 수용
+                n_text = nick if len(nick) <= 16 else nick[:15] + ".."
                 bbox = badge_font.getbbox(n_text)
                 txt_w = bbox[2] - bbox[0]
                 box_w = max(40, txt_w + 20)
@@ -5370,7 +5337,7 @@ def generate_party_card_image(date_str: str, sessions: list, page: int, max_page
             curr_y += card_height + card_gap
 
     footer_text = "Hoya Voice Activity System • Discord"
-    draw.text((width - 270, height - 32), footer_text, font=footer_font, fill=(90, 105, 125))
+    draw.text((width - 270, height - 28), footer_text, font=footer_font, fill=(90, 105, 125))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -5425,24 +5392,28 @@ class VoiceDateSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        selected_date = self.values[0]
-        if selected_date == "none":
-            await interaction.followup.send("⚠️ 해당 월에는 진행된 게임 파티가 없습니다.", ephemeral=True)
-            return
-            
-        detail_view = VoiceDateDetailView(
-            date_str=selected_date,
-            page=0,
-            author_id=self.view.author_id,
-            return_year=self.year,
-            return_month=self.month
-        )
-        embed, card_file = detail_view.get_response_data()
-        if card_file:
-            await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[card_file])
-        else:
-            await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[])
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            selected_date = self.values[0]
+            if selected_date == "none":
+                await interaction.followup.send("⚠️ 해당 월에는 진행된 게임 파티가 없습니다.", ephemeral=True)
+                return
+                
+            detail_view = VoiceDateDetailView(
+                date_str=selected_date,
+                page=0,
+                author_id=self.view.author_id,
+                return_year=self.year,
+                return_month=self.month
+            )
+            embed, card_file = detail_view.get_response_data()
+            if card_file:
+                await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[card_file])
+            else:
+                await interaction.edit_original_response(embed=embed, view=detail_view, attachments=[])
+        except Exception as e:
+            print(f"❌ [날짜 선택 콜백 오류] {e}")
 
 class VoiceCalendarView(discord.ui.View):
     def __init__(self, year: int, month: int, author_id: int):
@@ -5482,32 +5453,50 @@ class VoiceCalendarView(discord.ui.View):
 
     @discord.ui.button(label="◀ 이전 달", style=discord.ButtonStyle.secondary, row=1)
     async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        m = self.month - 1
-        y = self.year
-        if m < 1:
-            m = 12
-            y -= 1
-        new_view = VoiceCalendarView(y, m, self.author_id)
-        await interaction.edit_original_response(embed=new_view.get_embed(), view=new_view, attachments=[])
+        try:
+            m = self.month - 1
+            y = self.year
+            if m < 1:
+                m = 12
+                y -= 1
+            new_view = VoiceCalendarView(y, m, self.author_id)
+            embed = new_view.get_embed()
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
+            else:
+                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+        except Exception as e:
+            print(f"❌ [이전 달 이동 오류] {e}")
 
     @discord.ui.button(label="🔄 오늘", style=discord.ButtonStyle.primary, row=1)
     async def today(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        now_kst = get_kst_now()
-        new_view = VoiceCalendarView(now_kst.year, now_kst.month, self.author_id)
-        await interaction.edit_original_response(embed=new_view.get_embed(), view=new_view, attachments=[])
+        try:
+            now_kst = get_kst_now()
+            new_view = VoiceCalendarView(now_kst.year, now_kst.month, self.author_id)
+            embed = new_view.get_embed()
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
+            else:
+                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+        except Exception as e:
+            print(f"❌ [오늘 날짜 이동 오류] {e}")
 
     @discord.ui.button(label="다음 달 ▶", style=discord.ButtonStyle.secondary, row=1)
     async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        m = self.month + 1
-        y = self.year
-        if m > 12:
-            m = 1
-            y += 1
-        new_view = VoiceCalendarView(y, m, self.author_id)
-        await interaction.edit_original_response(embed=new_view.get_embed(), view=new_view, attachments=[])
+        try:
+            m = self.month + 1
+            y = self.year
+            if m > 12:
+                m = 1
+                y += 1
+            new_view = VoiceCalendarView(y, m, self.author_id)
+            embed = new_view.get_embed()
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
+            else:
+                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+        except Exception as e:
+            print(f"❌ [다음 달 이동 오류] {e}")
 
 class VoiceDateDetailView(discord.ui.View):
     def __init__(self, date_str: str, page: int, author_id: int, return_year: int, return_month: int):
@@ -5561,33 +5550,54 @@ class VoiceDateDetailView(discord.ui.View):
 
     @discord.ui.button(label="◀ 캘린더로 돌아가기", style=discord.ButtonStyle.primary, row=0)
     async def back_to_calendar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
-        await interaction.edit_original_response(embed=cal_view.get_embed(), view=cal_view, attachments=[])
+        try:
+            cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
+            embed = cal_view.get_embed()
+            if not interaction.response.is_done():
+                await interaction.response.edit_message(embed=embed, view=cal_view, attachments=[])
+            else:
+                await interaction.edit_original_response(embed=embed, view=cal_view, attachments=[])
+        except Exception as e:
+            print(f"❌ [캘린더 복귀 오류] {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.defer()
+                cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
+                await interaction.edit_original_response(embed=cal_view.get_embed(), view=cal_view, attachments=[])
+            except Exception as e2:
+                print(f"❌ [캘린더 복귀 2차 재시도 오류] {e2}")
 
     @discord.ui.button(label="◀ 이전", style=discord.ButtonStyle.secondary, row=0)
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        if self.page > 0:
-            self.page -= 1
-            self.update_buttons()
-            embed, card_file = self.get_response_data()
-            if card_file:
-                await interaction.edit_original_response(embed=embed, view=self, attachments=[card_file])
-            else:
-                await interaction.edit_original_response(embed=embed, view=self, attachments=[])
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            if self.page > 0:
+                self.page -= 1
+                self.update_buttons()
+                embed, card_file = self.get_response_data()
+                if card_file:
+                    await interaction.edit_original_response(embed=embed, view=self, attachments=[card_file])
+                else:
+                    await interaction.edit_original_response(embed=embed, view=self, attachments=[])
+        except Exception as e:
+            print(f"❌ [이전 페이지 오류] {e}")
 
     @discord.ui.button(label="다음 ▶", style=discord.ButtonStyle.secondary, row=0)
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        if self.page < self.max_page:
-            self.page += 1
-            self.update_buttons()
-            embed, card_file = self.get_response_data()
-            if card_file:
-                await interaction.edit_original_response(embed=embed, view=self, attachments=[card_file])
-            else:
-                await interaction.edit_original_response(embed=embed, view=self, attachments=[])
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
+            if self.page < self.max_page:
+                self.page += 1
+                self.update_buttons()
+                embed, card_file = self.get_response_data()
+                if card_file:
+                    await interaction.edit_original_response(embed=embed, view=self, attachments=[card_file])
+                else:
+                    await interaction.edit_original_response(embed=embed, view=self, attachments=[])
+        except Exception as e:
+            print(f"❌ [다음 페이지 오류] {e}")
 
 
 # 캘린더 명령어 등록
@@ -5732,9 +5742,13 @@ async def on_voice_state_update(member, before, after):
                     print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
                 except discord.Forbidden:
                     print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
-                except Exception as e:
-                    print(f"❌ 음성 채널 삭제 중 오류 발생: {e}")
 
+@bot.event
+async def on_guild_channel_delete(channel):
+    """음성 채널이 디스코드 상에서 삭제되면 해당 채널의 게임 세션을 즉시 종료합니다."""
+    if isinstance(channel, discord.VoiceChannel):
+        end_game_session(channel.id)
+        print(f"🗑️ [음성 채널 삭제 감지] #{channel.name} ({channel.id}) 세션 종료 처리")
 
 
 # Run Flask server and start Discord bot
