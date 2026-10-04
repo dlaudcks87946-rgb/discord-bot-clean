@@ -2,3 +2,4 @@ discord.py
 flask
 psycopg2-binary
 openpyxl
+Pillow
