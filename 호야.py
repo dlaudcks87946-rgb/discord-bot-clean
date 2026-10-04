@@ -119,6 +119,50 @@ def init_db():
     )
     """)
 
+    id_col_type = "SERIAL PRIMARY KEY" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS voice_activity_logs (
+        id {id_col_type},
+        event_type TEXT,
+        event_date TEXT,
+        event_time TEXT,
+        guild_id {user_id_type},
+        user_id {user_id_type},
+        user_name TEXT,
+        channel_id {user_id_type},
+        channel_name TEXT,
+        detail TEXT,
+        created_at TEXT
+    )
+    """)
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_voice_logs_date ON voice_activity_logs (event_date);")
+    except Exception:
+        pass
+
+    cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS voice_game_sessions (
+        session_id {id_col_type},
+        session_date TEXT,
+        channel_id {user_id_type},
+        channel_name TEXT,
+        category_name TEXT,
+        creator_id {user_id_type},
+        creator_nick TEXT,
+        status_message TEXT,
+        start_time TEXT,
+        end_time TEXT,
+        duration_min INTEGER DEFAULT 0,
+        participants TEXT,
+        is_active INTEGER DEFAULT 1,
+        created_at TEXT
+    )
+    """)
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_voice_sessions_date ON voice_game_sessions (session_date);")
+    except Exception:
+        pass
+
 #     cursor.execute(f"""
 #     CREATE TABLE IF NOT EXISTS lotto_tickets (
 #         id {"SERIAL" if DATABASE_URL else "INTEGER PRIMARY KEY AUTOINCREMENT"},
@@ -1918,7 +1962,7 @@ intents.voice_states = True
 intents.members = True
 
 # Bot initialization
-bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents)
+bot = commands.Bot(command_prefix=commands.when_mentioned_or("!"), intents=intents, enable_debug_events=True)
 
 # class PassRankingView(discord.ui.View):
 #     def __init__(self, full_rows):
@@ -4759,7 +4803,658 @@ async def on_member_update(before: discord.Member, after: discord.Member):
                 print(f"❌ 닉네임 자동 정리 오류 ({after.name}): {e}")
 
 
-# 동적 음성 채널 생성 이벤트
+# ==========================================
+# [음성 채널 로깅 및 게임 세션 관리 시스템]
+# ==========================================
+LOG_VOICE_STATUS_CHANNEL_ID = 1518304536136253674
+recently_created_hub_channels = set()
+active_game_sessions = {}  # channel_id -> session info
+
+def start_game_session(channel: discord.VoiceChannel, creator: discord.Member = None, category: discord.CategoryChannel = None):
+    """새로운 음성 채널이 생성될 때 게임 파티(세션)를 시작합니다."""
+    try:
+        now_kst = get_kst_now()
+        session_date = now_kst.strftime("%Y-%m-%d")
+        start_time = now_kst.strftime("%H:%M:%S")
+        created_at = now_kst.strftime("%Y-%m-%d %H:%M:%S")
+        
+        creator_id = creator.id if creator else 0
+        creator_nick = creator.display_name if creator else "알수없음"
+        category_name = category.name if category else ""
+        status_message = "설정된 상태메시지 없음"
+        
+        participants = {str(creator_id): creator_nick} if creator else {}
+        participants_json = json.dumps(participants, ensure_ascii=False)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if DATABASE_URL:
+            cursor.execute("""
+            INSERT INTO voice_game_sessions 
+            (session_date, channel_id, channel_name, category_name, creator_id, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING session_id
+            """, (session_date, channel.id, channel.name, category_name, creator_id, creator_nick, status_message, start_time, "진행 중", 0, participants_json, 1, created_at))
+            session_id = cursor.fetchone()[0]
+        else:
+            cursor.execute("""
+            INSERT INTO voice_game_sessions 
+            (session_date, channel_id, channel_name, category_name, creator_id, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (session_date, channel.id, channel.name, category_name, creator_id, creator_nick, status_message, start_time, "진행 중", 0, participants_json, 1, created_at))
+            session_id = cursor.lastrowid
+            
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        active_game_sessions[channel.id] = {
+            "session_id": session_id,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "category_name": category_name,
+            "creator_nick": creator_nick,
+            "status_message": status_message,
+            "start_dt": now_kst,
+            "start_time": start_time,
+            "session_date": session_date,
+            "participants": participants
+        }
+        print(f"🎮 [게임 세션 시작] #{channel.name} (방장: {creator_nick}, 세션ID: {session_id})")
+    except Exception as e:
+        print(f"❌ [게임 세션 시작 오류] {e}")
+
+def add_session_participant(channel_id: int, member: discord.Member):
+    """음성 채널에 입장한 멤버를 세션 참가자 목록에 닉네임으로 등록합니다."""
+    try:
+        if member.bot:
+            return
+        nick = member.display_name
+        sess = active_game_sessions.get(channel_id)
+        if sess:
+            sess["participants"][str(member.id)] = nick
+            participants_json = json.dumps(sess["participants"], ensure_ascii=False)
+            session_id = sess["session_id"]
+            
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute("UPDATE voice_game_sessions SET participants = %s WHERE session_id = %s", (participants_json, session_id))
+            else:
+                cursor.execute("UPDATE voice_game_sessions SET participants = ? WHERE session_id = ?", (participants_json, session_id))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute("SELECT session_id, participants FROM voice_game_sessions WHERE channel_id = %s AND is_active = 1 ORDER BY session_id DESC LIMIT 1", (channel_id,))
+            else:
+                cursor.execute("SELECT session_id, participants FROM voice_game_sessions WHERE channel_id = ? AND is_active = 1 ORDER BY session_id DESC LIMIT 1", (channel_id,))
+            row = cursor.fetchone()
+            if row:
+                sid, p_json = row
+                try:
+                    parts = json.loads(p_json) if p_json else {}
+                except Exception:
+                    parts = {}
+                parts[str(member.id)] = nick
+                new_p_json = json.dumps(parts, ensure_ascii=False)
+                if DATABASE_URL:
+                    cursor.execute("UPDATE voice_game_sessions SET participants = %s WHERE session_id = %s", (new_p_json, sid))
+                else:
+                    cursor.execute("UPDATE voice_game_sessions SET participants = ? WHERE session_id = ?", (new_p_json, sid))
+                conn.commit()
+            cursor.close()
+            conn.close()
+    except Exception as e:
+        print(f"❌ [게임 세션 참여자 추가 오류] {e}")
+
+def update_session_status(channel_id: int, new_status: str):
+    """음성 채널의 상태메시지(게임명/내용)를 세션에 업데이트합니다."""
+    try:
+        status_text = new_status if (new_status and new_status.strip()) else "상태메시지 없음"
+        sess = active_game_sessions.get(channel_id)
+        if sess:
+            sess["status_message"] = status_text
+            session_id = sess["session_id"]
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute("UPDATE voice_game_sessions SET status_message = %s WHERE session_id = %s", (status_text, session_id))
+            else:
+                cursor.execute("UPDATE voice_game_sessions SET status_message = ? WHERE session_id = ?", (status_text, session_id))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        else:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            if DATABASE_URL:
+                cursor.execute("UPDATE voice_game_sessions SET status_message = %s WHERE channel_id = %s AND is_active = 1", (status_text, channel_id))
+            else:
+                cursor.execute("UPDATE voice_game_sessions SET status_message = ? WHERE channel_id = ? AND is_active = 1", (status_text, channel_id))
+            conn.commit()
+            cursor.close()
+            conn.close()
+        print(f"🏷️ [게임 세션 상태메시지 갱신] 채널 {channel_id}: '{status_text}'")
+    except Exception as e:
+        print(f"❌ [게임 세션 상태 업데이트 오류] {e}")
+
+def end_game_session(channel_id: int):
+    """음성 채널이 비어 삭제될 때 세션을 종료하고 총 플레이 시간을 계산합니다."""
+    try:
+        now_kst = get_kst_now()
+        end_time = now_kst.strftime("%H:%M:%S")
+        sess = active_game_sessions.pop(channel_id, None)
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        if sess:
+            duration_sec = int((now_kst - sess["start_dt"]).total_seconds())
+            duration_min = max(1, duration_sec // 60)
+            session_id = sess["session_id"]
+            if DATABASE_URL:
+                cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, duration_min, session_id))
+            else:
+                cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, duration_min, session_id))
+            print(f"🏁 [게임 세션 종료] #{sess['channel_name']} (플레이 시간: {duration_min}분)")
+        else:
+            if DATABASE_URL:
+                cursor.execute("UPDATE voice_game_sessions SET end_time = %s, is_active = 0 WHERE channel_id = %s AND is_active = 1", (end_time, channel_id))
+            else:
+                cursor.execute("UPDATE voice_game_sessions SET end_time = ?, is_active = 0 WHERE channel_id = ? AND is_active = 1", (end_time, channel_id))
+                
+        conn.commit()
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        print(f"❌ [게임 세션 종료 오류] {e}")
+
+async def send_voice_log_embed(embed: discord.Embed):
+    try:
+        log_channel = bot.get_channel(LOG_VOICE_STATUS_CHANNEL_ID)
+        if not log_channel:
+            log_channel = await bot.fetch_channel(LOG_VOICE_STATUS_CHANNEL_ID)
+        if log_channel:
+            await log_channel.send(embed=embed)
+    except Exception as e:
+        print(f"❌ [음성 로그 전송 오류] {e}")
+
+async def log_voice_channel_created(channel: discord.VoiceChannel, creator: discord.Member = None, category: discord.CategoryChannel = None):
+    try:
+        creator_nick = creator.display_name if creator else "알 수 없음"
+        embed = discord.Embed(
+            title="🔊 음성 채널 생성",
+            description=f"{channel.mention} 채널이 생성되었습니다.",
+            color=0x2ECC71,  # 산뜻한 녹색
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        if creator:
+            embed.set_author(name=f"{creator.display_name} ({creator.name})", icon_url=creator.display_avatar.url)
+            embed.add_field(name="👑 방장 (생성자)", value=f"**{creator_nick}** ({creator.mention})", inline=True)
+        else:
+            embed.add_field(name="👑 방장 (생성자)", value="`알 수 없음`", inline=True)
+            
+        embed.add_field(name="🏷️ 생성된 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
+        if category:
+            embed.add_field(name="📂 카테고리", value=f"`{category.name}`", inline=True)
+        
+        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
+        await send_voice_log_embed(embed)
+    except Exception as e:
+        print(f"❌ [음성 채널 생성 로그 오류] {e}")
+
+async def log_voice_channel_join(member: discord.Member, channel: discord.VoiceChannel, before_channel: discord.VoiceChannel = None):
+    try:
+        is_move = before_channel is not None
+        member_nick = member.display_name
+        if not is_move:
+            title = "📥 음성 채널 입장"
+            desc = f"**{member_nick}** 님이 음성 채널에 입장했습니다."
+            color = 0x3498DB  # 선명한 파란색
+        else:
+            title = "🔀 음성 채널 이동"
+            desc = f"**{member_nick}** 님이 다른 음성 채널로 이동했습니다."
+            color = 0xE67E22  # 주황색
+
+        embed = discord.Embed(
+            title=title,
+            description=desc,
+            color=color,
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_author(name=f"{member.display_name} ({member.name})", icon_url=member.display_avatar.url)
+        embed.add_field(name="👤 닉네임", value=f"**{member_nick}** ({member.mention})", inline=True)
+        
+        if not is_move:
+            embed.add_field(name="🔊 입장 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
+        else:
+            embed.add_field(name="🚪 이전 채널", value=f"{before_channel.mention}\n`{before_channel.name}`", inline=True)
+            embed.add_field(name="🔊 이동 채널", value=f"{channel.mention}\n`{channel.name}`", inline=True)
+
+        embed.add_field(name="👥 현재 인원", value=f"`{len(channel.members)}명`", inline=True)
+        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
+        await send_voice_log_embed(embed)
+    except Exception as e:
+        print(f"❌ [음성 채널 입장 로그 오류] {e}")
+
+async def handle_voice_status_update(channel_id: int, new_status: str, guild_id: int = None):
+    try:
+        # 게임 세션 상태메시지 갱신
+        update_session_status(channel_id, new_status)
+        
+        await asyncio.sleep(0.8)
+        channel = bot.get_channel(channel_id)
+        guild = channel.guild if channel and hasattr(channel, "guild") else None
+        if not guild and guild_id:
+            guild = bot.get_guild(int(guild_id))
+            if guild and not channel:
+                channel = guild.get_channel(channel_id)
+                
+        updater = None
+        if guild and guild.me.guild_permissions.view_audit_log:
+            try:
+                async for entry in guild.audit_logs(limit=5):
+                    if entry.action.value == 192 or str(entry.action).lower() == "voice_channel_status_update":
+                        target_id = entry.target.id if entry.target else None
+                        if target_id == channel_id:
+                            diff = (discord.utils.utcnow() - entry.created_at).total_seconds()
+                            if diff < 15:
+                                updater = entry.user
+                                break
+            except Exception:
+                pass
+
+        channel_mention = channel.mention if channel else f"<#{channel_id}>"
+        channel_name = channel.name if channel else f"ID: {channel_id}"
+
+        embed = discord.Embed(
+            title="💬 음성 채널 상태메시지 변경",
+            description=f"{channel_mention} 의 게임/상태메시지가 변경되었습니다.",
+            color=0x9B59B6,  # 보라색
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        if updater:
+            embed.set_author(name=f"{updater.display_name} ({updater.name})", icon_url=updater.display_avatar.url)
+            embed.add_field(name="👤 변경자", value=f"**{updater.display_name}** ({updater.mention})", inline=True)
+            
+        embed.add_field(name="🔊 음성 채널", value=f"{channel_mention}\n`{channel_name}`", inline=True)
+        
+        status_display = f"🎮 **{new_status}**" if (new_status and new_status.strip()) else "*(상태메시지가 삭제됨)*"
+        embed.add_field(name="🏷️ 변경된 게임/상태", value=status_display, inline=False)
+        
+        embed.set_footer(text="호야 음성 로깅 시스템", icon_url=bot.user.display_avatar.url if bot.user else None)
+        await send_voice_log_embed(embed)
+    except Exception as e:
+        print(f"❌ [상태메시지 로깅 오류] {e}")
+
+# [방법 A] 웹소켓 원시 이벤트 수신을 통한 음성 채널 상태메시지 감지
+@bot.event
+async def on_socket_raw_receive(msg):
+    if not isinstance(msg, str):
+        return
+    try:
+        if "VOICE_CHANNEL_STATUS_UPDATE" in msg:
+            payload = json.loads(msg)
+            if payload.get("t") == "VOICE_CHANNEL_STATUS_UPDATE":
+                d = payload.get("d", {})
+                channel_id = int(d.get("id"))
+                new_status = d.get("status")
+                guild_id = d.get("guild_id")
+                asyncio.create_task(handle_voice_status_update(channel_id, new_status, guild_id))
+    except Exception:
+        pass
+
+# 관리자 수동 생성 음성 채널 감지 이벤트
+@bot.event
+async def on_guild_channel_create(channel):
+    if not isinstance(channel, discord.VoiceChannel):
+        return
+    if channel.id in recently_created_hub_channels:
+        recently_created_hub_channels.discard(channel.id)
+        return
+    
+    creator = None
+    if channel.guild.me.guild_permissions.view_audit_log:
+        try:
+            await asyncio.sleep(0.5)
+            async for entry in channel.guild.audit_logs(limit=5, action=discord.AuditLogAction.channel_create):
+                if entry.target and entry.target.id == channel.id:
+                    creator = entry.user
+                    break
+        except Exception:
+            pass
+    start_game_session(channel, creator, channel.category)
+    await log_voice_channel_created(channel, creator, channel.category)
+
+
+# ==========================================
+# [게임 파티/세션 캘린더 UI 시스템]
+# ==========================================
+
+def render_calendar_text(year: int, month: int, active_dates: dict) -> str:
+    """해당 년/월의 달력을 텍스트 그리드로 포맷팅합니다."""
+    now_kst = get_kst_now()
+    today_y, today_m, today_d = now_kst.year, now_kst.month, now_kst.day
+    cal = calendar.monthcalendar(year, month)
+    header = "  일   월   화   수   목   금   토\n"
+    lines = [header]
+    for week in cal:
+        row_str = ""
+        for day in week:
+            if day == 0:
+                row_str += "     "
+            else:
+                date_key = f"{year:04d}-{month:02d}-{day:02d}"
+                has_active = date_key in active_dates
+                is_today = (year == today_y and month == today_m and day == today_d)
+                if is_today and has_active:
+                    day_str = f"[{day}*]".center(5)
+                elif is_today:
+                    day_str = f"[{day}]".center(5)
+                elif has_active:
+                    day_str = f"{day}*".center(5)
+                else:
+                    day_str = f"{day}".center(5)
+                row_str += day_str
+        lines.append(row_str)
+    return "\n".join(lines)
+
+def get_monthly_active_session_dates(year: int, month: int) -> dict:
+    """해당 월에 게임 세션이 열렸던 날짜와 세션 수를 반환합니다."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        like_pattern = f"{year:04d}-{month:02d}-%"
+        if DATABASE_URL:
+            cursor.execute("SELECT session_date, COUNT(*) FROM voice_game_sessions WHERE session_date LIKE %s GROUP BY session_date ORDER BY session_date ASC", (like_pattern,))
+        else:
+            cursor.execute("SELECT session_date, COUNT(*) FROM voice_game_sessions WHERE session_date LIKE ? GROUP BY session_date ORDER BY session_date ASC", (like_pattern,))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return {r[0]: r[1] for r in rows}
+    except Exception as e:
+        print(f"❌ [월별 세션 날짜 조회 오류] {e}")
+        return {}
+
+def get_date_game_sessions(date_str: str) -> list:
+    """특정 날짜의 게임 파티/세션 목록을 조회합니다."""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if DATABASE_URL:
+            cursor.execute("""
+            SELECT session_id, channel_name, category_name, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active 
+            FROM voice_game_sessions 
+            WHERE session_date = %s 
+            ORDER BY session_id ASC
+            """, (date_str,))
+        else:
+            cursor.execute("""
+            SELECT session_id, channel_name, category_name, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active 
+            FROM voice_game_sessions 
+            WHERE session_date = ? 
+            ORDER BY session_id ASC
+            """, (date_str,))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print(f"❌ [날짜별 게임 세션 조회 오류] {e}")
+        return []
+
+class VoiceDateSelect(discord.ui.Select):
+    def __init__(self, year: int, month: int, active_dates: dict):
+        self.year = year
+        self.month = month
+        options = []
+        
+        sorted_dates = sorted(active_dates.keys(), reverse=True)
+        now_kst = get_kst_now()
+        today_key = f"{now_kst.year:04d}-{now_kst.month:02d}-{now_kst.day:02d}"
+        
+        # 오늘 날짜 옵션 우선 추가
+        if year == now_kst.year and month == now_kst.month and today_key not in active_dates:
+            options.append(discord.SelectOption(
+                label=f"{month}월 {now_kst.day}일 (오늘)",
+                value=today_key,
+                description="아직 진행된 게임 파티가 없습니다.",
+                emoji="📅"
+            ))
+            
+        for d in sorted_dates:
+            if len(options) >= 25:
+                break
+            count = active_dates[d]
+            day_num = int(d.split("-")[2])
+            options.append(discord.SelectOption(
+                label=f"{month}월 {day_num}일",
+                value=d,
+                description=f"게임 파티 {count}개 진행됨",
+                emoji="🎮"
+            ))
+            
+        if not options:
+            options.append(discord.SelectOption(
+                label="기록 없음",
+                value="none",
+                description=f"{year}년 {month}월에는 진행된 게임 파티가 없습니다.",
+                emoji="⚪"
+            ))
+            
+        super().__init__(
+            placeholder=f"확인할 날짜를 선택하세요 ({year}년 {month}월)",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected_date = self.values[0]
+        if selected_date == "none":
+            await interaction.response.send_message("⚠️ 해당 월에는 진행된 게임 파티가 없습니다.", ephemeral=True)
+            return
+            
+        detail_view = VoiceDateDetailView(
+            date_str=selected_date,
+            page=0,
+            author_id=self.view.author_id,
+            return_year=self.year,
+            return_month=self.month
+        )
+        embed = detail_view.get_embed()
+        await interaction.response.edit_message(embed=embed, view=detail_view)
+
+class VoiceCalendarView(discord.ui.View):
+    def __init__(self, year: int, month: int, author_id: int):
+        super().__init__(timeout=180)
+        self.year = year
+        self.month = month
+        self.author_id = author_id
+        
+        self.active_dates = get_monthly_active_session_dates(year, month)
+        self.select_menu = VoiceDateSelect(year, month, self.active_dates)
+        self.add_item(self.select_menu)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("⚠️ 명령어를 실행한 사용자만 조작할 수 있습니다.", ephemeral=True)
+            return False
+        return True
+
+    def get_embed(self) -> discord.Embed:
+        cal_text = render_calendar_text(self.year, self.month, self.active_dates)
+        total_sessions = sum(self.active_dates.values())
+        
+        embed = discord.Embed(
+            title=f"📅 {self.year}년 {self.month}월 게임 세션/파티 캘린더",
+            description=(
+                f"```text\n{cal_text}\n```\n"
+                f"• `*` 표시: 게임 파티가 열렸던 날짜\n"
+                f"• `[ ]` 표시: 오늘 날짜\n"
+                f"• 이번 달 총 진행된 파티: **{total_sessions:,}개**\n\n"
+                f"👇 **아래 메뉴에서 날짜를 선택하면 어떤 게임을 누구와 함께 플레이했는지 확인하실 수 있습니다.**"
+            ),
+            color=0x5865F2,
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        embed.set_footer(text="호야 게임 파티 캘린더")
+        return embed
+
+    @discord.ui.button(label="◀ 이전 달", style=discord.ButtonStyle.secondary, row=1)
+    async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        m = self.month - 1
+        y = self.year
+        if m < 1:
+            m = 12
+            y -= 1
+        new_view = VoiceCalendarView(y, m, self.author_id)
+        await interaction.response.edit_message(embed=new_view.get_embed(), view=new_view)
+
+    @discord.ui.button(label="🔄 오늘", style=discord.ButtonStyle.primary, row=1)
+    async def today(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now_kst = get_kst_now()
+        new_view = VoiceCalendarView(now_kst.year, now_kst.month, self.author_id)
+        await interaction.response.edit_message(embed=new_view.get_embed(), view=new_view)
+
+    @discord.ui.button(label="다음 달 ▶", style=discord.ButtonStyle.secondary, row=1)
+    async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
+        m = self.month + 1
+        y = self.year
+        if m > 12:
+            m = 1
+            y += 1
+        new_view = VoiceCalendarView(y, m, self.author_id)
+        await interaction.response.edit_message(embed=new_view.get_embed(), view=new_view)
+
+class VoiceDateDetailView(discord.ui.View):
+    def __init__(self, date_str: str, page: int, author_id: int, return_year: int, return_month: int):
+        super().__init__(timeout=180)
+        self.date_str = date_str
+        self.page = page
+        self.author_id = author_id
+        self.return_year = return_year
+        self.return_month = return_month
+        self.sessions = get_date_game_sessions(date_str)
+        self.per_page = 3  # 페이지당 3개 파티 표시
+        self.max_page = max(0, (len(self.sessions) - 1) // self.per_page)
+        self.update_buttons()
+
+    def update_buttons(self):
+        self.prev_btn.disabled = (self.page <= 0)
+        self.next_btn.disabled = (self.page >= self.max_page)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("⚠️ 명령어를 실행한 사용자만 조작할 수 있습니다.", ephemeral=True)
+            return False
+        return True
+
+    def get_embed(self) -> discord.Embed:
+        y, m, d = self.date_str.split("-")
+        total = len(self.sessions)
+        
+        embed = discord.Embed(
+            title=f"🎮 {y}년 {int(m)}월 {int(d)}일 게임 파티/세션 기록",
+            color=0x2ECC71,
+            timestamp=datetime.datetime.now(datetime.timezone.utc)
+        )
+        
+        if not self.sessions:
+            embed.description = "해당 날짜에는 진행된 게임 파티가 없습니다."
+            embed.set_footer(text="호야 게임 파티 캘린더 • 0개")
+            return embed
+            
+        start_idx = self.page * self.per_page
+        end_idx = start_idx + self.per_page
+        page_sessions = self.sessions[start_idx:end_idx]
+        
+        desc_parts = [f"총 **{total}개**의 게임 파티가 열렸습니다. (페이지 {self.page + 1}/{self.max_page + 1})\n"]
+        
+        for idx, sess in enumerate(page_sessions, start=start_idx + 1):
+            sid, cname, catname, creator_nick, status_msg, stime, etime, duration, parts_json, is_active = sess
+            
+            # 참가자 닉네임 목록 파싱
+            nick_list = []
+            try:
+                parts_dict = json.loads(parts_json) if parts_json else {}
+                nick_list = list(parts_dict.values())
+            except Exception:
+                nick_list = [creator_nick]
+                
+            if not nick_list:
+                nick_list = [creator_nick]
+                
+            # 플레이 시간 포맷팅
+            if is_active:
+                time_display = f"`{stime}` ~ `진행 중` 🟢"
+            else:
+                dur_text = f"{duration // 60}시간 {duration % 60}분" if duration >= 60 else f"{duration}분"
+                time_display = f"`{stime}` ~ `{etime}` ({dur_text})"
+                
+            # 게임 / 상태메시지
+            game_display = status_msg if status_msg and status_msg != "설정된 상태메시지 없음" else "*(설정된 상태메시지 없음)*"
+            
+            # 멤버 닉네임 목록
+            member_nicks_formatted = ", ".join([f"**{n}**" for n in nick_list])
+            
+            card = (
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏆 **[파티 {idx}] {cname}**\n"
+                f"• 🎮 **게임/상태:** **{game_display}**\n"
+                f"• 👑 **방장 (생성자):** **{creator_nick}**\n"
+                f"• 🕒 **플레이 시간:** {time_display}\n"
+                f"• 👥 **함께 플레이한 멤버 ({len(nick_list)}명):**\n"
+                f"  👉 {member_nicks_formatted}\n"
+            )
+            desc_parts.append(card)
+                
+        embed.description = "\n".join(desc_parts)
+        embed.set_footer(text=f"호야 게임 파티 캘린더 • {self.date_str} • {self.page + 1}/{self.max_page + 1} 페이지")
+        return embed
+
+    @discord.ui.button(label="◀ 캘린더로 돌아가기", style=discord.ButtonStyle.primary, row=0)
+    async def back_to_calendar(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
+        await interaction.response.edit_message(embed=cal_view.get_embed(), view=cal_view)
+
+    @discord.ui.button(label="◀ 이전", style=discord.ButtonStyle.secondary, row=0)
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page > 0:
+            self.page -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+    @discord.ui.button(label="다음 ▶", style=discord.ButtonStyle.secondary, row=0)
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.page < self.max_page:
+            self.page += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.get_embed(), view=self)
+
+
+# 캘린더 명령어 등록
+@bot.tree.command(name="음성캘린더", description="날짜별 어떤 게임을 누구랑 같이 했는지 게임 파티 캘린더를 확인합니다.")
+async def slash_voice_calendar(interaction: discord.Interaction):
+    now_kst = get_kst_now()
+    view = VoiceCalendarView(now_kst.year, now_kst.month, interaction.user.id)
+    await interaction.response.send_message(embed=view.get_embed(), view=view)
+
+@bot.command(name="음성캘린더", aliases=["게임기록", "음성기록", "음성로그"])
+async def cmd_voice_calendar(ctx):
+    now_kst = get_kst_now()
+    view = VoiceCalendarView(now_kst.year, now_kst.month, ctx.author.id)
+    await ctx.send(embed=view.get_embed(), view=view)
+
+
+# 동적 음성 채널 생성 및 음성 이벤트
 @bot.event
 async def on_voice_state_update(member, before, after):
     # 0. 음성 채널 이용 시간 기록
@@ -4794,6 +5489,12 @@ async def on_voice_state_update(member, before, after):
             "channel_name": "🫧・『 싱글게임 』"
         }
     }
+
+    # 허브 채널 ID 목록
+    hub_channel_ids = list(CONFIGS.keys())
+    team_hub_id = 1532691400230047805
+    if team_hub_id not in hub_channel_ids:
+        hub_channel_ids.append(team_hub_id)
 
     # 1. 허브 채널 입장 감지 및 채널 생성
     if after.channel and after.channel.id in CONFIGS:
@@ -4830,7 +5531,14 @@ async def on_voice_state_update(member, before, after):
                     name=channel_name,
                     category=category
                 )
+                recently_created_hub_channels.add(new_channel.id)
                 print(f"🔊 새 음성 채널 생성 완료: '{channel_name}' (ID: {new_channel.id})")
+                
+                # 게임 파티 세션 시작 (방장 및 채널 정보 등록)
+                start_game_session(new_channel, member, category)
+                
+                # 로그 전송: 누가 음성채널을 만들었는지 기록
+                await log_voice_channel_created(new_channel, member, category)
                 
                 # 유저를 생성된 채널로 이동
                 await member.move_to(new_channel)
@@ -4842,7 +5550,18 @@ async def on_voice_state_update(member, before, after):
         else:
             print(f"❌ 오류: 카테고리 ID {config['category_id']}를 찾을 수 없거나 올바른 카테고리가 아닙니다.")
 
-    # 2. 유저 퇴장 감지 및 빈 임시 채널 삭제
+    # 2. 음성 채널 입장 / 이동 로그 기록 (누가 들어갔는지)
+    if before.channel != after.channel and after.channel is not None:
+        # 허브 채널에 들어간 것은 곧바로 새 방으로 이동되므로 제외
+        if after.channel.id not in hub_channel_ids:
+            # 함께 플레이한 멤버로 닉네임 등록
+            add_session_participant(after.channel.id, member)
+            
+            # 허브 채널에서 방금 생성된 새 방으로 유저가 이동된 경우는 생성 로그로 이미 안내되므로 스킵
+            if not (before.channel and before.channel.id in hub_channel_ids):
+                await log_voice_channel_join(member, after.channel, before.channel)
+
+    # 3. 유저 퇴장 감지 및 빈 임시 채널 삭제
     if before.channel and before.channel != after.channel:
         # 퇴장 감지할 카테고리 ID 목록 수집
         target_categories = [config["category_id"] for config in CONFIGS.values()]
@@ -4850,17 +5569,12 @@ async def on_voice_state_update(member, before, after):
         team_category_id = 1532692129569046559
         if team_category_id not in target_categories:
             target_categories.append(team_category_id)
-            
-        # 허브 채널 ID 목록 수집 (허브 채널 자체는 삭제 방지)
-        hub_channel_ids = list(CONFIGS.keys())
-        # 팀 나누기 허브 채널 ID도 삭제 방지 목록에 포함시킴
-        team_hub_id = 1532691400230047805
-        if team_hub_id not in hub_channel_ids:
-            hub_channel_ids.append(team_hub_id)
 
         if before.channel.category and before.channel.category.id in target_categories:
-            # 허브 채널이 아니고 빈 채널이면 삭제 (이름 변경 지원)
+            # 허브 채널이 아니고 빈 채널이면 세션 종료 및 삭제 (이름 변경 지원)
             if before.channel.id not in hub_channel_ids and len(before.channel.members) == 0:
+                # 게임 파티 세션 종료 처리 (총 플레이 시간 계산 및 기록)
+                end_game_session(before.channel.id)
                 try:
                     await before.channel.delete()
                     print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
