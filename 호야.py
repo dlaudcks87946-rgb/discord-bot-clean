@@ -4957,7 +4957,7 @@ def update_session_status(channel_id: int, new_status: str):
         print(f"❌ [게임 세션 상태 업데이트 오류] {e}")
 
 def end_game_session(channel_id: int):
-    """음성 채널이 비어 삭제될 때 세션을 종료하고 총 플레이 시간을 계산합니다."""
+    """음성 채널이 비어 삭제될 때 세션을 종료하고 총 플레이 시간을 계산합니다. 5분 이하는 기록하지 않고 삭제합니다."""
     try:
         now_kst = get_kst_now()
         end_time = now_kst.strftime("%H:%M:%S")
@@ -4970,11 +4970,20 @@ def end_game_session(channel_id: int):
             duration_sec = int((now_kst - sess["start_dt"]).total_seconds())
             duration_min = max(1, duration_sec // 60)
             session_id = sess["session_id"]
-            if DATABASE_URL:
-                cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, duration_min, session_id))
+            
+            # 플레이 시간이 5분 이하(300초 이하)인 경우 기록하지 않고 삭제
+            if duration_sec <= 300:
+                if DATABASE_URL:
+                    cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = %s", (session_id,))
+                else:
+                    cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = ?", (session_id,))
+                print(f"🗑️ [게임 세션 기록 제외] #{sess['channel_name']} (플레이 시간: {duration_sec}초 / 5분 이하로 삭제)")
             else:
-                cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, duration_min, session_id))
-            print(f"🏁 [게임 세션 종료] #{sess['channel_name']} (플레이 시간: {duration_min}분)")
+                if DATABASE_URL:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, duration_min, session_id))
+                else:
+                    cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, duration_min, session_id))
+                print(f"🏁 [게임 세션 종료] #{sess['channel_name']} (플레이 시간: {duration_min}분)")
         else:
             if DATABASE_URL:
                 cursor.execute("SELECT session_id, start_time, session_date FROM voice_game_sessions WHERE channel_id = %s AND is_active = 1", (channel_id,))
@@ -4984,17 +4993,29 @@ def end_game_session(channel_id: int):
             for r in rows:
                 sid, stime_str, sdate_str = r
                 dur_min = 1
+                dur_sec = 0
                 try:
                     st_dt = datetime.datetime.strptime(f"{sdate_str} {stime_str}", "%Y-%m-%d %H:%M:%S")
                     st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
-                    dur_min = max(1, int((now_kst - st_dt).total_seconds()) // 60)
+                    dur_sec = int((now_kst - st_dt).total_seconds())
+                    dur_min = max(1, dur_sec // 60)
                 except Exception:
                     dur_min = 1
-                if DATABASE_URL:
-                    cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                    dur_sec = 0
+                
+                # 플레이 시간이 5분 이하인 경우 삭제
+                if dur_sec <= 300 or dur_min <= 5:
+                    if DATABASE_URL:
+                        cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = %s", (sid,))
+                    else:
+                        cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = ?", (sid,))
+                    print(f"🗑️ [게임 세션 복구 기록 제외] 세션ID {sid} (플레이 시간 5분 이하로 삭제)")
                 else:
-                    cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
-                print(f"🏁 [게임 세션 복구 종료] 세션ID {sid} (플레이 시간: {dur_min}분)")
+                    if DATABASE_URL:
+                        cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                    else:
+                        cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
+                    print(f"🏁 [게임 세션 복구 종료] 세션ID {sid} (플레이 시간: {dur_min}분)")
                 
         conn.commit()
         cursor.close()
@@ -5003,7 +5024,7 @@ def end_game_session(channel_id: int):
         print(f"❌ [게임 세션 종료 오류] {e}")
 
 def sync_active_game_sessions():
-    """봇에 연결된 실제 디스코드 음성 채널 상태를 조회하여, 이미 삭제되었거나 멤버가 0명인 유령 세션을 자동 종료합니다."""
+    """봇에 연결된 실제 디스코드 음성 채널 상태를 조회하여, 이미 삭제되었거나 멤버가 0명인 유령 세션을 자동 종료/정리합니다."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -5015,21 +5036,34 @@ def sync_active_game_sessions():
         for row in active_rows:
             sid, ch_id, stime_str, sdate_str = row
             channel = bot.get_channel(ch_id)
-            # 채널이 디스코드 상에서 삭제되었거나, 음성 채널에 아무도 없는 경우 즉시 세션 종료
+            # 채널이 디스코드 상에서 삭제되었거나, 음성 채널에 아무도 없는 경우 즉시 세션 종료/삭제
             if channel is None or (hasattr(channel, 'members') and len(channel.members) == 0):
                 dur_min = 1
+                dur_sec = 0
                 try:
                     st_dt = datetime.datetime.strptime(f"{sdate_str} {stime_str}", "%Y-%m-%d %H:%M:%S")
                     st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
-                    dur_min = max(1, int((now_kst - st_dt).total_seconds()) // 60)
+                    dur_sec = int((now_kst - st_dt).total_seconds())
+                    dur_min = max(1, dur_sec // 60)
                 except Exception:
                     dur_min = 1
-                if DATABASE_URL:
-                    cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                    dur_sec = 0
+                
+                # 플레이 시간이 5분 이하인 경우 삭제
+                if dur_sec <= 300 or dur_min <= 5:
+                    if DATABASE_URL:
+                        cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = %s", (sid,))
+                    else:
+                        cursor.execute("DELETE FROM voice_game_sessions WHERE session_id = ?", (sid,))
+                    active_game_sessions.pop(ch_id, None)
+                    print(f"🧹 [유령 세션 정리] 세션ID {sid} (5분 이하로 삭제)")
                 else:
-                    cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
-                active_game_sessions.pop(ch_id, None)
-                print(f"🧹 [유령 세션 자동 종료] 세션ID {sid} (채널 {ch_id} 부재/비어있음, {dur_min}분 기록)")
+                    if DATABASE_URL:
+                        cursor.execute("UPDATE voice_game_sessions SET end_time = %s, duration_min = %s, is_active = 0 WHERE session_id = %s", (end_time, dur_min, sid))
+                    else:
+                        cursor.execute("UPDATE voice_game_sessions SET end_time = ?, duration_min = ?, is_active = 0 WHERE session_id = ?", (end_time, dur_min, sid))
+                    active_game_sessions.pop(ch_id, None)
+                    print(f"🧹 [유령 세션 자동 종료] 세션ID {sid} (채널 {ch_id} 부재/비어있음, {dur_min}분 기록)")
         conn.commit()
         cursor.close()
         conn.close()
@@ -5128,46 +5162,84 @@ def render_calendar_text(year: int, month: int, active_dates: dict) -> str:
         lines.append(row_str)
     return "\n".join(lines)
 
-def clean_invalid_bot_sessions():
-    """봇 계정('나는 헤븐' 등)으로 잘못 생성된 세션 데이터를 DB에서 정리합니다."""
+def clean_invalid_sessions():
+    """봇 계정('나는 헤븐' 등)으로 잘못 생성된 세션 및 플레이 시간 5분 이하 세션을 DB에서 정리합니다."""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         bot_id = bot.user.id if bot.user else 0
         if DATABASE_URL:
-            cursor.execute("DELETE FROM voice_game_sessions WHERE creator_id = %s OR creator_nick = '나는 헤븐'", (bot_id,))
+            cursor.execute("""
+            DELETE FROM voice_game_sessions 
+            WHERE creator_id = %s 
+               OR creator_nick = '나는 헤븐' 
+               OR (is_active = 0 AND duration_min <= 5)
+            """, (bot_id,))
         else:
-            cursor.execute("DELETE FROM voice_game_sessions WHERE creator_id = ? OR creator_nick = '나는 헤븐'", (bot_id,))
+            cursor.execute("""
+            DELETE FROM voice_game_sessions 
+            WHERE creator_id = ? 
+               OR creator_nick = '나는 헤븐' 
+               OR (is_active = 0 AND duration_min <= 5)
+            """, (bot_id,))
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"❌ [세션 데이터 정리 오류] {e}")
+
+# 하위 호환성 별칭
+clean_invalid_bot_sessions = clean_invalid_sessions
 
 def get_monthly_active_session_dates(year: int, month: int) -> dict:
-    """해당 월에 게임 세션이 열렸던 날짜와 세션 수를 반환합니다."""
+    """해당 월에 게임 세션이 열렸던 날짜와 세션 수를 반환합니다. (5분 이하 제외)"""
     try:
-        clean_invalid_bot_sessions()
+        clean_invalid_sessions()
+        sync_active_game_sessions()
         conn = get_db_connection()
         cursor = conn.cursor()
         like_pattern = f"{year:04d}-{month:02d}-%"
         bot_id = bot.user.id if bot.user else 0
         if DATABASE_URL:
-            cursor.execute("SELECT session_date, COUNT(*) FROM voice_game_sessions WHERE session_date LIKE %s AND creator_nick != '나는 헤븐' AND creator_id != %s GROUP BY session_date ORDER BY session_date ASC", (like_pattern, bot_id))
+            cursor.execute("""
+            SELECT session_date, start_time, is_active 
+            FROM voice_game_sessions 
+            WHERE session_date LIKE %s AND creator_nick != '나는 헤븐' AND creator_id != %s AND (is_active = 1 OR duration_min > 5)
+            """, (like_pattern, bot_id))
         else:
-            cursor.execute("SELECT session_date, COUNT(*) FROM voice_game_sessions WHERE session_date LIKE ? AND creator_nick != '나는 헤븐' AND creator_id != ? GROUP BY session_date ORDER BY session_date ASC", (like_pattern, bot_id))
+            cursor.execute("""
+            SELECT session_date, start_time, is_active 
+            FROM voice_game_sessions 
+            WHERE session_date LIKE ? AND creator_nick != '나는 헤븐' AND creator_id != ? AND (is_active = 1 OR duration_min > 5)
+            """, (like_pattern, bot_id))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-        return {r[0]: r[1] for r in rows}
+
+        now_kst = get_kst_now()
+        date_counts = {}
+        for r in rows:
+            s_date, s_time, is_act = r
+            if is_act == 1:
+                # 진행 중인 세션은 현재까지 5분(300초) 이상 경과한 세션만 카운트
+                try:
+                    st_dt = datetime.datetime.strptime(f"{s_date} {s_time}", "%Y-%m-%d %H:%M:%S")
+                    st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+                    if (now_kst - st_dt).total_seconds() <= 300:
+                        continue
+                except Exception:
+                    pass
+            date_counts[s_date] = date_counts.get(s_date, 0) + 1
+
+        return date_counts
     except Exception as e:
         print(f"❌ [월별 세션 날짜 조회 오류] {e}")
         return {}
 
 def get_date_game_sessions(date_str: str) -> list:
-    """특정 날짜의 게임 파티/세션 목록을 조회합니다."""
+    """특정 날짜의 게임 파티/세션 목록을 조회합니다. (5분 이하 제외)"""
     try:
-        clean_invalid_bot_sessions()
+        clean_invalid_sessions()
         sync_active_game_sessions()
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -5176,20 +5248,36 @@ def get_date_game_sessions(date_str: str) -> list:
             cursor.execute("""
             SELECT session_id, channel_name, category_name, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active 
             FROM voice_game_sessions 
-            WHERE session_date = %s AND creator_nick != '나는 헤븐' AND creator_id != %s
+            WHERE session_date = %s AND creator_nick != '나는 헤븐' AND creator_id != %s AND (is_active = 1 OR duration_min > 5)
             ORDER BY session_id ASC
             """, (date_str, bot_id))
         else:
             cursor.execute("""
             SELECT session_id, channel_name, category_name, creator_nick, status_message, start_time, end_time, duration_min, participants, is_active 
             FROM voice_game_sessions 
-            WHERE session_date = ? AND creator_nick != '나는 헤븐' AND creator_id != ?
+            WHERE session_date = ? AND creator_nick != '나는 헤븐' AND creator_id != ? AND (is_active = 1 OR duration_min > 5)
             ORDER BY session_id ASC
             """, (date_str, bot_id))
         rows = cursor.fetchall()
         cursor.close()
         conn.close()
-        return rows
+
+        now_kst = get_kst_now()
+        valid_sessions = []
+        for r in rows:
+            is_act = r[9]
+            s_time = r[5]
+            if is_act == 1:
+                try:
+                    st_dt = datetime.datetime.strptime(f"{date_str} {s_time}", "%Y-%m-%d %H:%M:%S")
+                    st_dt = st_dt.replace(tzinfo=datetime.timezone(datetime.timedelta(hours=9)))
+                    if (now_kst - st_dt).total_seconds() <= 300:
+                        continue
+                except Exception:
+                    pass
+            valid_sessions.append(r)
+
+        return valid_sessions
     except Exception as e:
         print(f"❌ [날짜별 게임 세션 조회 오류] {e}")
         return []
@@ -5417,7 +5505,7 @@ class VoiceDateSelect(discord.ui.Select):
 
 class VoiceCalendarView(discord.ui.View):
     def __init__(self, year: int, month: int, author_id: int):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)  # 타임아웃 제거: 일정 시간이 지나도 버튼 응답 유지
         self.year = year
         self.month = month
         self.author_id = author_id
@@ -5431,6 +5519,16 @@ class VoiceCalendarView(discord.ui.View):
             await interaction.response.send_message("⚠️ 명령어를 실행한 사용자만 조작할 수 있습니다.", ephemeral=True)
             return False
         return True
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        print(f"❌ [캘린더 뷰 오류] {error}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚠️ 일시적인 오류가 발생했습니다. 다시 시도해주세요.", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ 일시적인 오류가 발생했습니다. 다시 시도해주세요.", ephemeral=True)
+        except Exception:
+            pass
 
     def get_embed(self) -> discord.Embed:
         cal_text = render_calendar_text(self.year, self.month, self.active_dates)
@@ -5454,6 +5552,8 @@ class VoiceCalendarView(discord.ui.View):
     @discord.ui.button(label="◀ 이전 달", style=discord.ButtonStyle.secondary, row=1)
     async def prev_month(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             m = self.month - 1
             y = self.year
             if m < 1:
@@ -5461,29 +5561,27 @@ class VoiceCalendarView(discord.ui.View):
                 y -= 1
             new_view = VoiceCalendarView(y, m, self.author_id)
             embed = new_view.get_embed()
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
-            else:
-                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+            await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
         except Exception as e:
             print(f"❌ [이전 달 이동 오류] {e}")
 
     @discord.ui.button(label="🔄 오늘", style=discord.ButtonStyle.primary, row=1)
     async def today(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             now_kst = get_kst_now()
             new_view = VoiceCalendarView(now_kst.year, now_kst.month, self.author_id)
             embed = new_view.get_embed()
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
-            else:
-                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+            await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
         except Exception as e:
             print(f"❌ [오늘 날짜 이동 오류] {e}")
 
     @discord.ui.button(label="다음 달 ▶", style=discord.ButtonStyle.secondary, row=1)
     async def next_month(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             m = self.month + 1
             y = self.year
             if m > 12:
@@ -5491,16 +5589,13 @@ class VoiceCalendarView(discord.ui.View):
                 y += 1
             new_view = VoiceCalendarView(y, m, self.author_id)
             embed = new_view.get_embed()
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=new_view, attachments=[])
-            else:
-                await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
+            await interaction.edit_original_response(embed=embed, view=new_view, attachments=[])
         except Exception as e:
             print(f"❌ [다음 달 이동 오류] {e}")
 
 class VoiceDateDetailView(discord.ui.View):
     def __init__(self, date_str: str, page: int, author_id: int, return_year: int, return_month: int):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)  # 타임아웃 제거: 일정 시간이 지나도 버튼 응답 유지
         self.date_str = date_str
         self.page = page
         self.author_id = author_id
@@ -5521,12 +5616,22 @@ class VoiceDateDetailView(discord.ui.View):
             return False
         return True
 
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item) -> None:
+        print(f"❌ [상세 카드 뷰 오류] {error}")
+        try:
+            if not interaction.response.is_done():
+                await interaction.response.send_message("⚠️ 일시적인 오류가 발생했습니다. 다시 시도해주세요.", ephemeral=True)
+            else:
+                await interaction.followup.send("⚠️ 일시적인 오류가 발생했습니다. 다시 시도해주세요.", ephemeral=True)
+        except Exception:
+            pass
+
     def get_response_data(self):
         y, m, d = self.date_str.split("-")
         total = len(self.sessions)
         
         embed = discord.Embed(
-            title=f"🎮 {y}년 {int(m)}월 {int(d)}일 파티 카드 리포트",
+            title=f"🎮 {y}년 {int(m)}월 {int(d)}일 파티 활동 목록",
             color=0x2ECC71,
             timestamp=datetime.datetime.now(datetime.timezone.utc)
         )
@@ -5536,32 +5641,69 @@ class VoiceDateDetailView(discord.ui.View):
             embed.set_footer(text="호야 게임 파티 캘린더 • 0개")
             return embed, None
 
+        embed.description = f"📊 총 **{total}개**의 게임 파티가 진행되었습니다. (페이지 {self.page + 1}/{self.max_page + 1})\n"
+
         start_idx = self.page * self.per_page
         end_idx = start_idx + self.per_page
         page_sessions = self.sessions[start_idx:end_idx]
 
-        # 이미지 카드 생성
-        buf = generate_party_card_image(self.date_str, page_sessions, self.page, self.max_page, total)
-        card_file = discord.File(fp=buf, filename="party_card.png")
-        embed.set_image(url="attachment://party_card.png")
-        embed.description = f"📊 총 **{total}개**의 게임 파티가 열렸습니다. (페이지 {self.page + 1}/{self.max_page + 1})"
+        for idx, sess in enumerate(page_sessions):
+            sid, cname, catname, creator_nick, status_msg, stime, etime, duration, parts_json, is_active = sess
+            party_no = idx + 1 + start_idx
+            
+            # 채널 이름 정리
+            clean_cname = cname.replace("・", " ").strip()
+            
+            # 게임 / 상태메시지
+            has_custom_status = status_msg and status_msg.strip() not in ["", "상태메시지 없음", "설정된 상태메시지 없음"]
+            game_display = status_msg.strip() if has_custom_status else "없음"
+            
+            # 플레이 시간
+            if is_active:
+                time_display = f"🟢 `{stime}` ~ 현재 진행 중 (LIVE)"
+            else:
+                dur_text = f"{duration // 60}시간 {duration % 60}분" if duration >= 60 else f"{duration}분"
+                time_display = f"⏱️ `{stime} ~ {etime}` ({dur_text})"
+                
+            # 참여자 목록 파싱
+            nick_list = []
+            try:
+                parts_dict = json.loads(parts_json) if parts_json else {}
+                nick_list = list(parts_dict.values())
+            except Exception:
+                nick_list = [creator_nick]
+            if not nick_list:
+                nick_list = [creator_nick]
+                
+            members_text = ", ".join(nick_list)
+            if len(members_text) > 250:
+                members_text = members_text[:247] + "..."
+
+            status_badge = "🟢 LIVE" if is_active else "🏁 종료"
+
+            field_title = f"🏷️ PARTY #{party_no} | {clean_cname} [{status_badge}]"
+            field_value = (
+                f"• 🎮 **게임/상태**: `{game_display}`\n"
+                f"• ⏰ **플레이 시간**: {time_display}\n"
+                f"• 👑 **방장**: **{creator_nick}**\n"
+                f"• 👥 **참여 멤버 ({len(nick_list)}명)**: {members_text}"
+            )
+            embed.add_field(name=field_title, value=field_value, inline=False)
+
         embed.set_footer(text=f"호야 게임 파티 캘린더 • {self.date_str} • {self.page + 1}/{self.max_page + 1} 페이지")
-        return embed, card_file
+        return embed, None
 
     @discord.ui.button(label="◀ 캘린더로 돌아가기", style=discord.ButtonStyle.primary, row=0)
     async def back_to_calendar(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
+            if not interaction.response.is_done():
+                await interaction.response.defer()
             cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
             embed = cal_view.get_embed()
-            if not interaction.response.is_done():
-                await interaction.response.edit_message(embed=embed, view=cal_view, attachments=[])
-            else:
-                await interaction.edit_original_response(embed=embed, view=cal_view, attachments=[])
+            await interaction.edit_original_response(embed=embed, view=cal_view, attachments=[])
         except Exception as e:
             print(f"❌ [캘린더 복귀 오류] {e}")
             try:
-                if not interaction.response.is_done():
-                    await interaction.response.defer()
                 cal_view = VoiceCalendarView(self.return_year, self.return_month, self.author_id)
                 await interaction.edit_original_response(embed=cal_view.get_embed(), view=cal_view, attachments=[])
             except Exception as e2:
