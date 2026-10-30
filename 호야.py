@@ -3232,7 +3232,7 @@ class IntroModal(discord.ui.Modal, title="자기소개 작성"):
     intro = discord.ui.TextInput(
         label="소개글 :",
         style=discord.TextStyle.paragraph,
-        placeholder="자유롭게 소개글을 작성해주세요",
+        placeholder="자유롭게 소개글을 작성해주세요 (오픈채팅과 디코는 필수입니다!)",
         required=True,
         max_length=1000
     )
@@ -3376,7 +3376,22 @@ async def refresh_intro_panel(channel: discord.TextChannel, force_recreate: bool
         row = cursor.fetchone()
         old_msg_id = row[0] if row else None
 
-        # force_recreate가 False이고 이미 마지막 메시지가 해당 패널인 경우 스킵
+        embed = discord.Embed(
+            title="📝 서버 자기소개 작성",
+            description=(
+                "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
+                "**[작성 양식]**\n"
+                "• **닉네임/나이 :**\n"
+                "• **주로하는 게임 :**\n"
+                "• **플레이 시간대 :**\n"
+                "• **소개글 :**\n"
+                "오픈채팅과 디코는 필수입니다!\n\n"
+                "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
+            ),
+            color=discord.Color.blue()
+        )
+
+        # force_recreate가 False이고 이미 마지막 메시지가 해당 패널인 경우 내용만 최신으로 수정
         if not force_recreate and old_msg_id:
             try:
                 last_msg = None
@@ -3384,8 +3399,10 @@ async def refresh_intro_panel(channel: discord.TextChannel, force_recreate: bool
                     last_msg = m
                     break
                 if last_msg and last_msg.id == old_msg_id:
+                    await last_msg.edit(embed=embed, view=IntroButtonView())
                     cursor.close()
                     conn.close()
+                    print(f"📝 자기소개 패널 기존 메시지 내용 갱신 완료 (ID: {last_msg.id})")
                     return
             except Exception:
                 pass
@@ -3398,19 +3415,6 @@ async def refresh_intro_panel(channel: discord.TextChannel, force_recreate: bool
             except Exception:
                 pass
 
-        embed = discord.Embed(
-            title="📝 서버 자기소개 작성",
-            description=(
-                "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
-                "**[작성 양식]**\n"
-                "• **닉네임/나이 :**\n"
-                "• **주로하는 게임 :**\n"
-                "• **플레이 시간대 :**\n"
-                "• **소개글 :**\n\n"
-                "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
-            ),
-            color=discord.Color.blue()
-        )
         new_msg = await channel.send(embed=embed, view=IntroButtonView())
 
         query = f"""
