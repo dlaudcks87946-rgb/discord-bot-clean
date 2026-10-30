@@ -3318,31 +3318,22 @@ class IntroModal(discord.ui.Modal, title="자기소개 작성"):
             except Exception as e:
                 print(f"❌ [모달 자기소개] 역할 제거 오류: {e}")
 
-        # 4. 채널(1497843456960364726)에 자기소개 게시
+        # 4. 채널(1497843456960364726)에 자기소개 게시 (임베드 없이 순수 글만 전송)
         intro_channel_id = 1497843456960364726
         intro_channel = guild.get_channel(intro_channel_id) or interaction.channel
         if intro_channel and isinstance(intro_channel, discord.TextChannel):
             try:
-                embed = discord.Embed(
-                    title=f"📋 {member.display_name}님의 자기소개",
-                    color=discord.Color.blue(),
-                    timestamp=discord.utils.utcnow()
-                )
-                embed.set_thumbnail(url=member.display_avatar.url)
-                embed.add_field(name="닉네임/나이 :", value=self.nickname_age.value, inline=False)
-                embed.add_field(name="주로하는 게임 :", value=self.game.value, inline=False)
-                embed.add_field(name="플레이 시간대 :", value=self.play_time.value, inline=False)
-                embed.add_field(name="소개글 :", value=self.intro.value, inline=False)
-                embed.set_footer(text=f"작성자 ID: {member.id}")
-
                 intro_text = (
-                    f"📢 {member.mention} 님이 자기소개를 작성하셨습니다!\n\n"
-                    f"**닉네임/나이 :** {self.nickname_age.value}\n"
-                    f"**주로하는 게임 :** {self.game.value}\n"
-                    f"**플레이 시간대 :** {self.play_time.value}\n"
-                    f"**소개글 :** {self.intro.value}"
+                    f"{member.mention}\n"
+                    f"닉네임/나이 : {self.nickname_age.value}\n"
+                    f"주로하는 게임 : {self.game.value}\n"
+                    f"플레이 시간대 : {self.play_time.value}\n"
+                    f"소개글 : {self.intro.value}"
                 )
-                await intro_channel.send(content=intro_text, embed=embed)
+                await intro_channel.send(content=intro_text)
+
+                # 새 자기소개 글이 작성되었으므로 버튼 패널을 맨 밑으로 갱신
+                await refresh_intro_panel(intro_channel, force_recreate=True)
             except Exception as send_err:
                 print(f"❌ [모달 자기소개] 채널 메시지 전송 오류: {send_err}")
 
@@ -3370,6 +3361,71 @@ class IntroButtonView(discord.ui.View):
     )
     async def open_intro_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(IntroModal())
+
+
+async def refresh_intro_panel(channel: discord.TextChannel, force_recreate: bool = True):
+    """
+    기존 자기소개 패널 메시지를 삭제하고, 채널의 가장 마지막(맨 밑)에 새로운 패널을 전송하여 고정합니다.
+    force_recreate가 False일 경우, 마지막 메시지가 이미 패널 메시지라면 재전송하지 않습니다.
+    """
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT message_id FROM intro_panel WHERE channel_id = {p}", (channel.id,))
+        row = cursor.fetchone()
+        old_msg_id = row[0] if row else None
+
+        # force_recreate가 False이고 이미 마지막 메시지가 해당 패널인 경우 스킵
+        if not force_recreate and old_msg_id:
+            try:
+                last_msg = None
+                async for m in channel.history(limit=1):
+                    last_msg = m
+                    break
+                if last_msg and last_msg.id == old_msg_id:
+                    cursor.close()
+                    conn.close()
+                    return
+            except Exception:
+                pass
+
+        # 기존 패널 메시지 삭제
+        if old_msg_id:
+            try:
+                old_msg = await channel.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except Exception:
+                pass
+
+        embed = discord.Embed(
+            title="📝 서버 자기소개 작성",
+            description=(
+                "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
+                "**[작성 양식]**\n"
+                "• **닉네임/나이 :**\n"
+                "• **주로하는 게임 :**\n"
+                "• **플레이 시간대 :**\n"
+                "• **소개글 :**\n\n"
+                "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
+            ),
+            color=discord.Color.blue()
+        )
+        new_msg = await channel.send(embed=embed, view=IntroButtonView())
+
+        query = f"""
+        INSERT INTO intro_panel (channel_id, message_id)
+        VALUES ({p}, {p})
+        ON CONFLICT (channel_id)
+        DO UPDATE SET message_id = EXCLUDED.message_id
+        """
+        cursor.execute(query, (channel.id, new_msg.id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"📝 자기소개 패널 맨 밑으로 갱신 완료 (ID: {new_msg.id})")
+    except Exception as e:
+        print(f"❌ 자기소개 패널 갱신 오류: {e}")
 
 
 def get_seconds_until_next_reset():
@@ -3547,57 +3603,11 @@ async def on_ready():
     else:
         print(f"❌ 오류: 패널 채널 ID {target_channel_id}를 찾을 수 없습니다.")
 
-    # 2-2. 자기소개 채널 패널 메시지 확인 및 자동 복구/생성 (채널 ID: 1497843456960364726)
+    # 2-2. 자기소개 채널 패널 메시지 확인 및 맨 밑 유지 (채널 ID: 1497843456960364726)
     intro_channel_id = 1497843456960364726
     intro_channel = bot.get_channel(intro_channel_id)
     if intro_channel:
-        try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            p = "%s" if DATABASE_URL else "?"
-            cursor.execute(f"SELECT message_id FROM intro_panel WHERE channel_id = {p}", (intro_channel_id,))
-            row = cursor.fetchone()
-            intro_msg_id = row[0] if row else None
-            
-            intro_panel_exists = False
-            if intro_msg_id:
-                try:
-                    await intro_channel.fetch_message(intro_msg_id)
-                    intro_panel_exists = True
-                except discord.NotFound:
-                    cursor.execute(f"DELETE FROM intro_panel WHERE channel_id = {p}", (intro_channel_id,))
-                    conn.commit()
-            
-            if not intro_panel_exists:
-                embed = discord.Embed(
-                    title="📝 서버 자기소개 작성",
-                    description=(
-                        "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
-                        "**[작성 양식]**\n"
-                        "• **닉네임/나이 :**\n"
-                        "• **주로하는 게임 :**\n"
-                        "• **플레이 시간대 :**\n"
-                        "• **소개글 :**\n\n"
-                        "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
-                    ),
-                    color=discord.Color.blue()
-                )
-                msg = await intro_channel.send(embed=embed, view=IntroButtonView())
-                query = f"""
-                INSERT INTO intro_panel (channel_id, message_id)
-                VALUES ({p}, {p})
-                ON CONFLICT (channel_id)
-                DO UPDATE SET message_id = EXCLUDED.message_id
-                """
-                cursor.execute(query, (intro_channel_id, msg.id))
-                conn.commit()
-                print(f"📝 자기소개 패널 메시지 생성 완료 (ID: {msg.id})")
-            else:
-                print("📝 자기소개 패널 메시지가 이미 존재합니다.")
-            cursor.close()
-            conn.close()
-        except Exception as intro_err:
-            print(f"❌ 자기소개 패널 확인/생성 중 오류 발생: {intro_err}")
+        await refresh_intro_panel(intro_channel, force_recreate=False)
     else:
         print(f"❌ 오류: 자기소개 채널 ID {intro_channel_id}를 찾을 수 없습니다.")
 
@@ -4524,41 +4534,12 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
 @bot.command(name="자기소개버튼", aliases=["자기소개패널"])
 @commands.has_permissions(administrator=True)
 async def cmd_create_intro_panel(ctx):
-    """자기소개 작성 버튼 패널을 수동으로 생성합니다."""
-    embed = discord.Embed(
-        title="📝 서버 자기소개 작성",
-        description=(
-            "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
-            "**[작성 양식]**\n"
-            "• **닉네임/나이 :**\n"
-            "• **주로하는 게임 :**\n"
-            "• **플레이 시간대 :**\n"
-            "• **소개글 :**\n\n"
-            "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
-        ),
-        color=discord.Color.blue()
-    )
-    msg = await ctx.send(embed=embed, view=IntroButtonView())
+    """자기소개 작성 버튼 패널을 수동으로 맨 밑에 생성/갱신합니다."""
     try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        p = "%s" if DATABASE_URL else "?"
-        query = f"""
-        INSERT INTO intro_panel (channel_id, message_id)
-        VALUES ({p}, {p})
-        ON CONFLICT (channel_id)
-        DO UPDATE SET message_id = EXCLUDED.message_id
-        """
-        cursor.execute(query, (ctx.channel.id, msg.id))
-        conn.commit()
-        cursor.close()
-        conn.close()
-        try:
-            await ctx.message.delete()
-        except Exception:
-            pass
-    except Exception as e:
-        print(f"❌ 자기소개 패널 수동 생성 DB 기록 실패: {e}")
+        await ctx.message.delete()
+    except Exception:
+        pass
+    await refresh_intro_panel(ctx.channel, force_recreate=True)
 
 
 @bot.event
@@ -4846,6 +4827,9 @@ async def on_message(message):
                             await msg.delete()
                 else:
                     print(f"❌ 오류: 역할 ID {target_role_id}를 서버에서 찾을 수 없습니다.")
+
+                # 채팅으로 양식을 작성한 경우에도 버튼 패널을 맨 밑으로 갱신하여 고정
+                await refresh_intro_panel(message.channel, force_recreate=True)
 
     await bot.process_commands(message)
 
