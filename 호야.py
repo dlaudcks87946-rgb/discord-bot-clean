@@ -103,6 +103,13 @@ def init_db():
     """)
 
     cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS intro_panel (
+        channel_id {user_id_type} PRIMARY KEY,
+        message_id {user_id_type}
+    )
+    """)
+
+    cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS users (
         user_id {user_id_type} PRIMARY KEY,
         xp INTEGER DEFAULT 0,
@@ -3203,6 +3210,168 @@ class StatusNicknameView(discord.ui.View):
                 pass
 
 
+class IntroModal(discord.ui.Modal, title="자기소개 작성"):
+    nickname_age = discord.ui.TextInput(
+        label="닉네임/나이 :",
+        placeholder="예: 홍길동 / 20",
+        required=True,
+        max_length=50
+    )
+    game = discord.ui.TextInput(
+        label="주로하는 게임 :",
+        placeholder="주로 플레이하는 게임을 입력해주세요",
+        required=True,
+        max_length=100
+    )
+    play_time = discord.ui.TextInput(
+        label="플레이 시간대 :",
+        placeholder="예: 평일 저녁 8시 ~ 12시 / 주말 등",
+        required=True,
+        max_length=100
+    )
+    intro = discord.ui.TextInput(
+        label="소개글 :",
+        style=discord.TextStyle.paragraph,
+        placeholder="자유롭게 소개글을 작성해주세요",
+        required=True,
+        max_length=1000
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        member = interaction.user
+        guild = interaction.guild
+
+        if not isinstance(member, discord.Member) or not guild:
+            await interaction.followup.send("❌ 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
+            return
+
+        # 1. 닉네임 파싱
+        raw_val = self.nickname_age.value.strip()
+        nickname = None
+
+        match1 = re.match(r'^(.+?)\s*/\s*(\d+)\s*(?:세|살)?(?:\D.*)?$', raw_val)
+        if match1:
+            nickname = match1.group(1).strip()
+        else:
+            match2 = re.match(r'^(.+?)\s+(\d+)\s*(?:세|살)?(?:\D.*)?$', raw_val)
+            if match2:
+                nickname = match2.group(1).strip()
+            else:
+                if '/' in raw_val:
+                    nickname = raw_val.split('/', 1)[0].strip()
+                else:
+                    nickname = raw_val
+
+        if not nickname:
+            nickname = member.name
+
+        # 기존 칭호([대괄호]) 유지
+        current_nick = member.nick or ""
+        match_prefix = re.match(r'^(\[.*?\])\s*', current_nick)
+        if match_prefix:
+            prefix = match_prefix.group(1)
+            target_nickname = f"{prefix} {nickname}"
+        else:
+            target_nickname = nickname
+
+        target_nickname = target_nickname[:32]
+
+        # 2. 닉네임 변경
+        nick_changed = False
+        nick_err_msg = ""
+        try:
+            await member.edit(nick=target_nickname)
+            nick_changed = True
+            print(f"✅ [모달 자기소개] 닉네임 변경 완료: {member.name} -> {target_nickname}")
+        except discord.Forbidden:
+            nick_err_msg = "\n⚠️ 봇의 권한 부족 또는 서열 문제로 서버 닉네임을 변경하지 못했습니다."
+            print(f"❌ [모달 자기소개] 닉네임 변경 권한 부족: {member.name}")
+        except Exception as e:
+            nick_err_msg = f"\n⚠️ 닉네임 변경 중 오류 발생: {e}"
+            print(f"❌ [모달 자기소개] 닉네임 변경 오류: {e}")
+
+        # 3. 역할 부여 (1497939431473287238) 및 이전 역할 제거 (1369712767631626313)
+        grant_role_id = 1497939431473287238
+        remove_role_id = 1369712767631626313
+
+        role_to_grant = guild.get_role(grant_role_id)
+        role_to_remove = guild.get_role(remove_role_id)
+
+        grant_success = False
+        if role_to_grant:
+            try:
+                await member.add_roles(role_to_grant)
+                grant_success = True
+                print(f"✅ [모달 자기소개] 역할 부여 완료: {member.name} -> {role_to_grant.name}")
+            except discord.Forbidden:
+                print(f"❌ [모달 자기소개] 역할 부여 권한 부족: '{role_to_grant.name}' 역할을 부여할 수 없습니다.")
+            except Exception as e:
+                print(f"❌ [모달 자기소개] 역할 부여 오류: {e}")
+        else:
+            print(f"❌ [모달 자기소개] 역할 ID {grant_role_id}를 찾을 수 없습니다.")
+
+        if role_to_remove and role_to_remove in member.roles:
+            try:
+                await member.remove_roles(role_to_remove)
+                print(f"✅ [모달 자기소개] 역할 제거 완료: {member.name} -> {role_to_remove.name}")
+            except Exception as e:
+                print(f"❌ [모달 자기소개] 역할 제거 오류: {e}")
+
+        # 4. 채널(1497843456960364726)에 자기소개 게시
+        intro_channel_id = 1497843456960364726
+        intro_channel = guild.get_channel(intro_channel_id) or interaction.channel
+        if intro_channel and isinstance(intro_channel, discord.TextChannel):
+            try:
+                embed = discord.Embed(
+                    title=f"📋 {member.display_name}님의 자기소개",
+                    color=discord.Color.blue(),
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed.add_field(name="닉네임/나이 :", value=self.nickname_age.value, inline=False)
+                embed.add_field(name="주로하는 게임 :", value=self.game.value, inline=False)
+                embed.add_field(name="플레이 시간대 :", value=self.play_time.value, inline=False)
+                embed.add_field(name="소개글 :", value=self.intro.value, inline=False)
+                embed.set_footer(text=f"작성자 ID: {member.id}")
+
+                intro_text = (
+                    f"📢 {member.mention} 님이 자기소개를 작성하셨습니다!\n\n"
+                    f"**닉네임/나이 :** {self.nickname_age.value}\n"
+                    f"**주로하는 게임 :** {self.game.value}\n"
+                    f"**플레이 시간대 :** {self.play_time.value}\n"
+                    f"**소개글 :** {self.intro.value}"
+                )
+                await intro_channel.send(content=intro_text, embed=embed)
+            except Exception as send_err:
+                print(f"❌ [모달 자기소개] 채널 메시지 전송 오류: {send_err}")
+
+        # 5. 제출 완료 응답
+        res_text = "✅ 자기소개가 성공적으로 작성되었습니다!"
+        if nick_changed:
+            res_text += f"\n- 닉네임이 **{target_nickname}**(으)로 변경되었습니다."
+        if grant_success and role_to_grant:
+            res_text += f"\n- **{role_to_grant.name}** 역할이 부여되었습니다."
+        if nick_err_msg:
+            res_text += nick_err_msg
+
+        await interaction.followup.send(res_text, ephemeral=True)
+
+
+class IntroButtonView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="자기소개 작성하기",
+        style=discord.ButtonStyle.primary,
+        emoji="📝",
+        custom_id="btn_open_intro_modal"
+    )
+    async def open_intro_modal(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(IntroModal())
+
+
 def get_seconds_until_next_reset():
     now = datetime.datetime.now()
     # 오늘 오전 6시 설정
@@ -3327,6 +3496,7 @@ async def on_ready():
 #     bot.add_view(PassPanelView())
 #     bot.add_view(ShopPanelView())
     bot.add_view(StatusNicknameView())
+    bot.add_view(IntroButtonView())
     
     # 2. 지정된 채널에 패널 메시지가 있는지 확인 및 자동 복구/생성
     target_channel_id = 1513160056214913144
@@ -3376,6 +3546,60 @@ async def on_ready():
             print(f"❌ 패널 메시지 확인/생성 중 DB 오류 발생: {db_err}")
     else:
         print(f"❌ 오류: 패널 채널 ID {target_channel_id}를 찾을 수 없습니다.")
+
+    # 2-2. 자기소개 채널 패널 메시지 확인 및 자동 복구/생성 (채널 ID: 1497843456960364726)
+    intro_channel_id = 1497843456960364726
+    intro_channel = bot.get_channel(intro_channel_id)
+    if intro_channel:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            p = "%s" if DATABASE_URL else "?"
+            cursor.execute(f"SELECT message_id FROM intro_panel WHERE channel_id = {p}", (intro_channel_id,))
+            row = cursor.fetchone()
+            intro_msg_id = row[0] if row else None
+            
+            intro_panel_exists = False
+            if intro_msg_id:
+                try:
+                    await intro_channel.fetch_message(intro_msg_id)
+                    intro_panel_exists = True
+                except discord.NotFound:
+                    cursor.execute(f"DELETE FROM intro_panel WHERE channel_id = {p}", (intro_channel_id,))
+                    conn.commit()
+            
+            if not intro_panel_exists:
+                embed = discord.Embed(
+                    title="📝 서버 자기소개 작성",
+                    description=(
+                        "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
+                        "**[작성 양식]**\n"
+                        "• **닉네임/나이 :**\n"
+                        "• **주로하는 게임 :**\n"
+                        "• **플레이 시간대 :**\n"
+                        "• **소개글 :**\n\n"
+                        "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
+                    ),
+                    color=discord.Color.blue()
+                )
+                msg = await intro_channel.send(embed=embed, view=IntroButtonView())
+                query = f"""
+                INSERT INTO intro_panel (channel_id, message_id)
+                VALUES ({p}, {p})
+                ON CONFLICT (channel_id)
+                DO UPDATE SET message_id = EXCLUDED.message_id
+                """
+                cursor.execute(query, (intro_channel_id, msg.id))
+                conn.commit()
+                print(f"📝 자기소개 패널 메시지 생성 완료 (ID: {msg.id})")
+            else:
+                print("📝 자기소개 패널 메시지가 이미 존재합니다.")
+            cursor.close()
+            conn.close()
+        except Exception as intro_err:
+            print(f"❌ 자기소개 패널 확인/생성 중 오류 발생: {intro_err}")
+    else:
+        print(f"❌ 오류: 자기소개 채널 ID {intro_channel_id}를 찾을 수 없습니다.")
 
     # 3. 현재 음성 채널에 있는 유저들 세션 초기화
     global active_sessions
@@ -4297,6 +4521,46 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
 
 
 # 양식 입력 확인 및 역할 제거 이벤트
+@bot.command(name="자기소개버튼", aliases=["자기소개패널"])
+@commands.has_permissions(administrator=True)
+async def cmd_create_intro_panel(ctx):
+    """자기소개 작성 버튼 패널을 수동으로 생성합니다."""
+    embed = discord.Embed(
+        title="📝 서버 자기소개 작성",
+        description=(
+            "아래 **[자기소개 작성하기]** 버튼을 눌러 양식을 작성해주세요!\n\n"
+            "**[작성 양식]**\n"
+            "• **닉네임/나이 :**\n"
+            "• **주로하는 게임 :**\n"
+            "• **플레이 시간대 :**\n"
+            "• **소개글 :**\n\n"
+            "작성을 완료하시면 서버 닉네임이 자동 변경되고 역할이 부여됩니다."
+        ),
+        color=discord.Color.blue()
+    )
+    msg = await ctx.send(embed=embed, view=IntroButtonView())
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        query = f"""
+        INSERT INTO intro_panel (channel_id, message_id)
+        VALUES ({p}, {p})
+        ON CONFLICT (channel_id)
+        DO UPDATE SET message_id = EXCLUDED.message_id
+        """
+        cursor.execute(query, (ctx.channel.id, msg.id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"❌ 자기소개 패널 수동 생성 DB 기록 실패: {e}")
+
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
@@ -4601,7 +4865,9 @@ async def on_member_remove(member):
             try:
                 # 최근 200개 글 중 해당 멤버가 쓴 가입 양식 탐색
                 async for msg in app_channel.history(limit=200):
-                    if msg.author.id == member.id:
+                    is_user_msg = (msg.author.id == member.id)
+                    is_bot_intro_msg = (msg.author.id == bot.user.id and (f"<@{member.id}>" in msg.content or str(member.id) in msg.content))
+                    if is_user_msg or is_bot_intro_msg:
                         content_stripped = "".join(msg.content.split())
                         if any(k in content_stripped for k in ["닉네임", "닉넴", "나이", "게임", "소개"]):
                             last_application = msg.content
@@ -5758,7 +6024,7 @@ async def cmd_voice_calendar(ctx):
     await ctx.send(embed=view.get_embed(), view=view)
 
 
-# 동적 음성 채널 생성 및 음성 이벤트
+# 음성 채널 이벤트
 @bot.event
 async def on_voice_state_update(member, before, after):
     # 0. 음성 채널 이용 시간 기록
@@ -5778,112 +6044,36 @@ async def on_voice_state_update(member, before, after):
                         add_voice_time(member.id, get_current_date(), duration)
                         print(f"🎙️ 음성 채널 퇴장 감지: {member.name} ({member.id}) - 이용 시간: {duration}초 추가")
 
-    # 다중 허브 채널 및 대상 설정
-    CONFIGS = {
-        1511038705932963991: {
-            "category_id": 1357930212146286644,
-            "channel_name": "⚡・『 메인게임 』"
-        },
-        1511037391765504130: {
-            "category_id": 1427312936098992262,
-            "channel_name": "💫・『 종합게임 』"
-        },
-        1510992054174351510: {
-            "category_id": 1511040771241935069,
-            "channel_name": "🫧・『 싱글게임 』"
-        }
-    }
-
-    # 허브 채널 ID 목록
-    hub_channel_ids = list(CONFIGS.keys())
-    team_hub_id = 1532691400230047805
-    if team_hub_id not in hub_channel_ids:
-        hub_channel_ids.append(team_hub_id)
-
-    # 1. 허브 채널 입장 감지 및 채널 생성
-    if after.channel and after.channel.id in CONFIGS:
-        config = CONFIGS[after.channel.id]
-        guild = member.guild
-        category = guild.get_channel(config["category_id"])
-        
-        if category and isinstance(category, discord.CategoryChannel):
-            try:
-                # 채널 이름 결정
-                channel_name = config["channel_name"]
-                if config.get("use_alphabet"):
-                    existing_names = [c.name for c in category.voice_channels]
-                    import string
-                    new_name = None
-                    for char in string.ascii_uppercase:
-                        candidate = f"{char}팀"
-                        if candidate not in existing_names:
-                            new_name = candidate
-                            break
-                    if not new_name:
-                        # A-Z까지 전부 꽉 찬 경우 예외적으로 A팀 2, A팀 3 ... 검색
-                        i = 2
-                        while True:
-                            candidate = f"A팀 {i}"
-                            if candidate not in existing_names:
-                                new_name = candidate
-                                break
-                            i += 1
-                    channel_name = new_name
-
-                # 지정된 카테고리 하위에 새 음성 채널 생성
-                new_channel = await guild.create_voice_channel(
-                    name=channel_name,
-                    category=category
-                )
-                recently_created_hub_channels.add(new_channel.id)
-                print(f"🔊 새 음성 채널 생성 완료: '{channel_name}' (ID: {new_channel.id})")
-                
-                # 게임 파티 세션 시작 (방장 및 채널 정보 등록)
-                start_game_session(new_channel, member, category)
-                
-                # 로그 전송: 누가 음성채널을 만들었는지 기록
-                await log_voice_channel_created(new_channel, member, category)
-                
-                # 유저를 생성된 채널로 이동
-                await member.move_to(new_channel)
-                print(f"➡️ {member.name} 님을 '{channel_name}' 채널로 이동시켰습니다.")
-            except discord.Forbidden:
-                print("❌ 권한 부족: 채널 생성 또는 멤버 이동 권한이 없습니다.")
-            except Exception as e:
-                print(f"❌ 음성 채널 생성/이동 중 오류 발생: {e}")
-        else:
-            print(f"❌ 오류: 카테고리 ID {config['category_id']}를 찾을 수 없거나 올바른 카테고리가 아닙니다.")
-
-    # 2. 음성 채널 입장 / 이동 로그 기록 (누가 들어갔는지)
+    # 1. 음성 채널 입장 / 이동 시 게임 파티 세션 처리 (일반 음성 채널 지원)
     if before.channel != after.channel and after.channel is not None:
-        # 허브 채널에 들어간 것은 곧바로 새 방으로 이동되므로 제외
-        if after.channel.id not in hub_channel_ids:
-            # 함께 플레이한 멤버로 닉네임 등록
-            add_session_participant(after.channel.id, member)
-            
-            # 허브 채널에서 방금 생성된 새 방으로 유저가 이동된 경우는 생성 로그로 이미 안내되므로 스킵
-            if not (before.channel and before.channel.id in hub_channel_ids):
-                await log_voice_channel_join(member, after.channel, before.channel)
+        if not member.bot:
+            # 채널에 활성 게임 세션이 없으면 새로 시작 (방장으로 등록)
+            if after.channel.id not in active_game_sessions:
+                start_game_session(after.channel, member, after.channel.category)
+            else:
+                # 이미 진행 중인 방이면 참가자로 추가
+                add_session_participant(after.channel.id, member)
 
-    # 3. 유저 퇴장 감지 및 빈 임시 채널 삭제
+            await log_voice_channel_join(member, after.channel, before.channel)
+
+    # 2. 음성 채널 퇴장 / 이동 시 세션 종료 및 빈 팀 임시 채널만 삭제
     if before.channel and before.channel != after.channel:
-        # 퇴장 감지할 카테고리 ID 목록 수집
-        target_categories = [config["category_id"] for config in CONFIGS.values()]
-        # 팀 나누기 카테고리 ID(1532692129569046559)도 자동 삭제 대상 카테고리에 포함시킴
-        team_category_id = 1532692129569046559
-        if team_category_id not in target_categories:
-            target_categories.append(team_category_id)
+        # 채널에 남은 멤버가 0명인 경우
+        if len(before.channel.members) == 0:
+            # 게임 파티 세션 종료 처리 (플레이 시간 5분 이하 자동 제외)
+            end_game_session(before.channel.id)
 
-        if before.channel.category and before.channel.category.id in target_categories:
-            # 허브 채널이 아니고 빈 채널이면 세션 종료 및 삭제 (이름 변경 지원)
-            if before.channel.id not in hub_channel_ids and len(before.channel.members) == 0:
-                # 게임 파티 세션 종료 처리 (총 플레이 시간 계산 및 기록)
-                end_game_session(before.channel.id)
+            # 팀 나누기 전용 카테고리(1532692129569046559)의 임시 채널만 빈 방일 때 삭제
+            team_category_id = 1532692129569046559
+            if before.channel.category and before.channel.category.id == team_category_id:
                 try:
                     await before.channel.delete()
-                    print(f"🗑️ 빈 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
+                    print(f"🗑️ 빈 팀 임시 음성 채널 삭제 완료: {before.channel.name} (ID: {before.channel.id})")
                 except discord.Forbidden:
-                    print("❌ 권한 부족: 채널을 삭제할 수 없습니다.")
+                    print("❌ 권한 부족: 팀 임시 채널을 삭제할 수 없습니다.")
+                except Exception as del_err:
+                    print(f"❌ 팀 임시 채널 삭제 오류: {del_err}")
+
 
 @bot.event
 async def on_guild_channel_delete(channel):
