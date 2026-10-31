@@ -4534,6 +4534,231 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
     await interaction.response.send_message(embed=embed, view=view)
 
 
+
+# ========================================================
+# 스레드 명단 조회 및 실시간 검색 인터랙티브 뷰
+# ========================================================
+DEFAULT_TARGET_THREAD_ID = 1498269657176473685
+
+async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_id: int):
+    """
+    지정된 스레드에서 메시지를 모두 수집하여, 유저별 최신 메시지 및 닉네임 정보를 정리하여 반환합니다.
+    """
+    thread = guild.get_thread(thread_id)
+    if not thread:
+        try:
+            thread = await guild.fetch_channel(thread_id)
+        except Exception:
+            thread = None
+            
+    if not thread:
+        return None, "❌ 스레드 또는 채널을 찾을 수 없습니다. (ID 확인 필요)"
+
+    # 스레드 내 메시지 수집
+    user_records = {} # user_id -> {member, display_name, username, message_content, created_at}
+    try:
+        async for msg in thread.history(limit=1000, oldest_first=True):
+            if msg.author.bot:
+                continue
+            
+            author = msg.author
+            member = guild.get_member(author.id)
+            if member:
+                display_name = member.nick or member.name
+            else:
+                display_name = getattr(author, 'nick', None) or author.name
+                
+            clean_content = msg.content.strip().replace("\n", " ")
+            if len(clean_content) > 40:
+                clean_content = clean_content[:37] + "..."
+                
+            user_records[author.id] = {
+                "member_id": author.id,
+                "display_name": display_name,
+                "username": author.name,
+                "content": clean_content or "(텍스트 없음)",
+                "created_at": msg.created_at
+            }
+    except discord.Forbidden:
+        return None, "❌ 해당 스레드를 읽을 권한이 봇에게 없습니다."
+    except Exception as e:
+        return None, f"❌ 스레드 메시지 수집 중 오류: {e}"
+
+    # 가나다 / 알파벳 순 정렬
+    records_list = list(user_records.values())
+    records_list.sort(key=lambda x: x["display_name"].lower())
+    return records_list, None
+
+
+class ThreadSearchModal(discord.ui.Modal, title="스레드 닉네임 검색"):
+    search_input = discord.ui.TextInput(
+        label="검색할 닉네임 또는 유저명",
+        placeholder="예: 철수, 홍길동, 98 등 (일부만 입력해도 검색됩니다)",
+        required=True,
+        max_length=50
+    )
+
+    def __init__(self, parent_view):
+        super().__init__()
+        self.parent_view = parent_view
+
+    async def on_submit(self, interaction: discord.Interaction):
+        query = self.search_input.value.strip()
+        self.parent_view.search_query = query
+        self.parent_view.current_page = 0
+        embed = self.parent_view.build_embed()
+        self.parent_view.update_button_states()
+        await interaction.response.edit_message(embed=embed, view=self.parent_view)
+
+
+class ThreadRosterView(discord.ui.View):
+    def __init__(self, bot_instance, guild: discord.Guild, thread_id: int, all_records: list, author_id: int, search_query: str = None):
+        super().__init__(timeout=300) # 5분 후 비활성화
+        self.bot = bot_instance
+        self.guild = guild
+        self.thread_id = thread_id
+        self.all_records = all_records
+        self.author_id = author_id
+        self.search_query = search_query
+        self.current_page = 0
+        self.page_size = 15
+        self.update_button_states()
+
+    def get_filtered_records(self):
+        if not self.search_query:
+            return self.all_records
+        q = self.search_query.lower()
+        return [
+            r for r in self.all_records
+            if q in r["display_name"].lower() or q in r["username"].lower() or q in r["content"].lower() or q in str(r["member_id"])
+        ]
+
+    def update_button_states(self):
+        filtered = self.get_filtered_records()
+        max_page = max(1, (len(filtered) + self.page_size - 1) // self.page_size)
+        
+        self.prev_btn.disabled = (self.current_page <= 0)
+        self.next_btn.disabled = (self.current_page >= max_page - 1)
+        self.reset_btn.disabled = (self.search_query is None)
+
+    def build_embed(self) -> discord.Embed:
+        filtered = self.get_filtered_records()
+        total_count = len(self.all_records)
+        matched_count = len(filtered)
+        max_page = max(1, (matched_count + self.page_size - 1) // self.page_size)
+        
+        if self.current_page >= max_page:
+            self.current_page = max_page - 1
+
+        start_idx = self.current_page * self.page_size
+        page_records = filtered[start_idx:start_idx + self.page_size]
+
+        title = "📋 스레드 참여자 명단"
+        if self.search_query:
+            description = (
+                f"🔍 **검색어:** `{self.search_query}` (일치: **{matched_count}**명 / 전체: **{total_count}**명)\n"
+                f"📄 **페이지:** `{self.current_page + 1} / {max_page}`\n\n"
+            )
+        else:
+            description = (
+                f"👥 **총 참여자 수:** **{total_count}**명\n"
+                f"📄 **페이지:** `{self.current_page + 1} / {max_page}`\n\n"
+            )
+
+        if not page_records:
+            if self.search_query:
+                description += "⚠️ 검색된 닉네임이나 유저가 없습니다.\n아래 **[전체보기]** 버튼을 눌러 초기화해 보세요."
+            else:
+                description += "스레드에 작성된 메시지가 없습니다."
+        else:
+            lines = []
+            for i, r in enumerate(page_records, start=start_idx + 1):
+                # 닉네임과 디스코드 유저명 함께 표시하여 동명이인이나 변경에 대비
+                if r["display_name"] != r["username"]:
+                    user_label = f"**{r['display_name']}** `({r['username']})`"
+                else:
+                    user_label = f"**{r['display_name']}**"
+                    
+                lines.append(f"`{i:2d}.` {user_label} : {r['content']}")
+            description += "\n".join(lines)
+
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=discord.Color.teal() if not self.search_query else discord.Color.orange()
+        )
+        embed.set_footer(text=f"스레드 ID: {self.thread_id} • 🔍 검색 또는 페이지 버튼을 사용해보세요.")
+        return embed
+
+    @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="◀️")
+    async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.current_page = max(0, self.current_page - 1)
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="▶️")
+    async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        filtered = self.get_filtered_records()
+        max_page = max(1, (len(filtered) + self.page_size - 1) // self.page_size)
+        self.current_page = min(max_page - 1, self.current_page + 1)
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="닉네임 검색", style=discord.ButtonStyle.primary, emoji="🔍")
+    async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ThreadSearchModal(parent_view=self))
+
+    @discord.ui.button(label="전체보기", style=discord.ButtonStyle.success, emoji="🔄")
+    async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.search_query = None
+        self.current_page = 0
+        self.update_button_states()
+        await interaction.response.edit_message(embed=self.build_embed(), view=self)
+
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.secondary, emoji="⚡")
+    async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        records, err = await fetch_thread_members_data(self.bot, self.guild, self.thread_id)
+        if records is not None:
+            self.all_records = records
+            self.update_button_states()
+            await interaction.followup.edit_message(message_id=interaction.message.id, embed=self.build_embed(), view=self)
+        else:
+            await interaction.followup.send(err or "❌ 새로고침 실패", ephemeral=True)
+
+
+@bot.tree.command(name="스레드명단", description="지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하고 검색합니다.")
+@app_commands.describe(검색어="찾고자 하는 닉네임 또는 유저명 (생략 시 전체 명단 조회)")
+async def slash_thread_roster(interaction: discord.Interaction, 검색어: str = None):
+    await interaction.response.defer()
+    guild = interaction.guild
+    if not guild:
+        await interaction.followup.send("❌ 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
+        return
+
+    records, err = await fetch_thread_members_data(bot, guild, DEFAULT_TARGET_THREAD_ID)
+    if err:
+        await interaction.followup.send(err, ephemeral=True)
+        return
+
+    view = ThreadRosterView(bot, guild, DEFAULT_TARGET_THREAD_ID, records, interaction.user.id, search_query=검색어)
+    await interaction.followup.send(embed=view.build_embed(), view=view)
+
+
+@bot.command(name="스레드명단", aliases=["스레드정리", "스레드검색", "스레드닉네임"])
+async def cmd_thread_roster(ctx, *, 검색어: str = None):
+    """지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하고 검색합니다."""
+    loading_msg = await ctx.send("⏳ 스레드 메시지를 분석하는 중입니다...")
+    records, err = await fetch_thread_members_data(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID)
+    if err:
+        await loading_msg.edit(content=err)
+        return
+
+    view = ThreadRosterView(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID, records, ctx.author.id, search_query=검색어)
+    await loading_msg.delete()
+    await ctx.send(embed=view.build_embed(), view=view)
+
+
 # 양식 입력 확인 및 역할 제거 이벤트
 @bot.command(name="자기소개버튼", aliases=["자기소개패널"])
 @commands.has_permissions(administrator=True)
