@@ -4560,6 +4560,21 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
 # ========================================================
 DEFAULT_TARGET_THREAD_ID = 1498269657176473685
 
+def extract_member_level(display_name: str) -> int:
+    """
+    닉네임에서 [Lv1], [LV.2], [Lv 3], [레벨4] 등의 숫자를 추출합니다.
+    레벨 표기가 없으면 9999를 반환하여 맨 뒤로 정렬합니다.
+    """
+    if not display_name:
+        return 9999
+    match = re.search(r'\[(?:[Ll][Vv]|레벨)\.?\s*(\d+)\]', display_name)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return 9999
+    return 9999
+
 async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_id: int):
     """
     지정된 스레드에서 메시지를 모두 수집하여, 유저별 최신 메시지 및 닉네임 정보를 정리하여 반환합니다.
@@ -4575,7 +4590,7 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
         return None, "❌ 스레드 또는 채널을 찾을 수 없습니다. (ID 확인 필요)"
 
     # 스레드 내 메시지 수집 (패널 메시지 등 봇 메시지 제외)
-    user_records = {} # user_id -> {member, display_name, content, created_at}
+    user_records = {} # user_id -> {member, display_name, content, created_at, level}
     try:
         async for msg in thread.history(limit=1000, oldest_first=True):
             if msg.author.bot:
@@ -4594,6 +4609,7 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
                 continue
 
             display_name = member.nick or member.name
+            user_level = extract_member_level(display_name)
                 
             clean_content = msg.content.strip().replace("\n", " ")
             if len(clean_content) > 40:
@@ -4602,6 +4618,7 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
             user_records[author.id] = {
                 "member_id": author.id,
                 "display_name": display_name,
+                "level": user_level,
                 "content": clean_content or "(텍스트 없음)",
                 "created_at": msg.created_at
             }
@@ -4610,9 +4627,9 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
     except Exception as e:
         return None, f"❌ 스레드 메시지 수집 중 오류: {e}"
 
-    # 가나다 / 알파벳 순 정렬
+    # 1레벨부터 오름차순 정렬 (레벨 동일 시 닉네임 가나다순)
     records_list = list(user_records.values())
-    records_list.sort(key=lambda x: x["display_name"].lower())
+    records_list.sort(key=lambda x: (x["level"], x["display_name"].lower()))
     return records_list, None
 
 
@@ -4685,7 +4702,7 @@ class ThreadRosterView(discord.ui.View):
         start_idx = self.current_page * self.page_size
         page_records = filtered[start_idx:start_idx + self.page_size]
 
-        title = "📋 스레드 참여자 명단"
+        title = "📋 오버워치 닉네임"
         if self.search_query:
             description = (
                 f"🔍 **검색어:** `{self.search_query}` (일치: **{matched_count}**명 / 전체: **{total_count}**명)\n"
@@ -4693,7 +4710,7 @@ class ThreadRosterView(discord.ui.View):
             )
         else:
             description = (
-                f"👥 **총 참여자 수:** **{total_count}**명\n"
+                f"👥 **총 인원수:** **{total_count}**명\n"
                 f"📄 **페이지:** `{self.current_page + 1} / {max_page}`\n\n"
             )
 
@@ -4714,7 +4731,7 @@ class ThreadRosterView(discord.ui.View):
             description=description,
             color=discord.Color.teal() if not self.search_query else discord.Color.orange()
         )
-        embed.set_footer(text=f"스레드 ID: {self.thread_id} • 실시간 자동 갱신 • 🔍 검색 또는 페이지 버튼 지원")
+        embed.set_footer(text="아직 테스트 단계입니다!")
         return embed
 
     @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="◀️", custom_id="btn_thread_roster_prev")
@@ -4819,7 +4836,7 @@ async def refresh_thread_roster_panel(thread: discord.Thread, force_recreate: bo
         print(f"❌ 스레드 명단 패널 갱신 오류: {e}")
 
 
-@bot.tree.command(name="스레드명단", description="지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하고 검색합니다.")
+@bot.tree.command(name="스레드명단", description="오버워치 닉네임 명단을 조회하고 검색합니다.")
 @app_commands.describe(검색어="찾고자 하는 닉네임 (생략 시 전체 명단 조회)")
 async def slash_thread_roster(interaction: discord.Interaction, 검색어: str = None):
     await interaction.response.defer()
