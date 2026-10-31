@@ -110,6 +110,13 @@ def init_db():
     """)
 
     cursor.execute(f"""
+    CREATE TABLE IF NOT EXISTS thread_roster_panel (
+        thread_id {user_id_type} PRIMARY KEY,
+        message_id {user_id_type}
+    )
+    """)
+
+    cursor.execute(f"""
     CREATE TABLE IF NOT EXISTS users (
         user_id {user_id_type} PRIMARY KEY,
         xp INTEGER DEFAULT 0,
@@ -3615,6 +3622,19 @@ async def on_ready():
     else:
         print(f"❌ 오류: 자기소개 채널 ID {intro_channel_id}를 찾을 수 없습니다.")
 
+    # 2-3. 스레드 명단 패널 메시지 확인 및 맨 밑 유지 (스레드 ID: 1498269657176473685)
+    target_thread_id = 1498269657176473685
+    for guild in bot.guilds:
+        t = guild.get_thread(target_thread_id)
+        if not t:
+            try:
+                t = await guild.fetch_channel(target_thread_id)
+            except Exception:
+                t = None
+        if t:
+            await refresh_thread_roster_panel(t, force_recreate=False)
+            break
+
     # 3. 현재 음성 채널에 있는 유저들 세션 초기화
     global active_sessions
     now = time.time()
@@ -4554,8 +4574,8 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
     if not thread:
         return None, "❌ 스레드 또는 채널을 찾을 수 없습니다. (ID 확인 필요)"
 
-    # 스레드 내 메시지 수집
-    user_records = {} # user_id -> {member, display_name, username, message_content, created_at}
+    # 스레드 내 메시지 수집 (패널 메시지 등 봇 메시지 제외)
+    user_records = {} # user_id -> {member, display_name, content, created_at}
     try:
         async for msg in thread.history(limit=1000, oldest_first=True):
             if msg.author.bot:
@@ -4575,7 +4595,6 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
             user_records[author.id] = {
                 "member_id": author.id,
                 "display_name": display_name,
-                "username": author.name,
                 "content": clean_content or "(텍스트 없음)",
                 "created_at": msg.created_at
             }
@@ -4592,7 +4611,7 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
 
 class ThreadSearchModal(discord.ui.Modal, title="스레드 닉네임 검색"):
     search_input = discord.ui.TextInput(
-        label="검색할 닉네임 또는 유저명",
+        label="검색할 닉네임",
         placeholder="예: 철수, 홍길동, 98 등 (일부만 입력해도 검색됩니다)",
         required=True,
         max_length=50
@@ -4612,17 +4631,23 @@ class ThreadSearchModal(discord.ui.Modal, title="스레드 닉네임 검색"):
 
 
 class ThreadRosterView(discord.ui.View):
-    def __init__(self, bot_instance, guild: discord.Guild, thread_id: int, all_records: list, author_id: int, search_query: str = None):
-        super().__init__(timeout=300) # 5분 후 비활성화
+    def __init__(self, bot_instance, guild: discord.Guild, thread_id: int, all_records: list = None, search_query: str = None):
+        super().__init__(timeout=None) # 영구 뷰로 유지
         self.bot = bot_instance
         self.guild = guild
         self.thread_id = thread_id
-        self.all_records = all_records
-        self.author_id = author_id
+        self.all_records = all_records if all_records is not None else []
         self.search_query = search_query
         self.current_page = 0
         self.page_size = 15
         self.update_button_states()
+
+    async def ensure_records(self):
+        if not self.all_records and self.guild:
+            records, _ = await fetch_thread_members_data(self.bot, self.guild, self.thread_id)
+            if records:
+                self.all_records = records
+                self.update_button_states()
 
     def get_filtered_records(self):
         if not self.search_query:
@@ -4630,7 +4655,7 @@ class ThreadRosterView(discord.ui.View):
         q = self.search_query.lower()
         return [
             r for r in self.all_records
-            if q in r["display_name"].lower() or q in r["username"].lower() or q in r["content"].lower() or q in str(r["member_id"])
+            if q in r["display_name"].lower() or q in r["content"].lower() or q in str(r["member_id"])
         ]
 
     def update_button_states(self):
@@ -4667,19 +4692,14 @@ class ThreadRosterView(discord.ui.View):
 
         if not page_records:
             if self.search_query:
-                description += "⚠️ 검색된 닉네임이나 유저가 없습니다.\n아래 **[전체보기]** 버튼을 눌러 초기화해 보세요."
+                description += "⚠️ 검색된 닉네임이 없습니다.\n아래 **[전체보기]** 버튼을 눌러 초기화해 보세요."
             else:
                 description += "스레드에 작성된 메시지가 없습니다."
         else:
             lines = []
             for i, r in enumerate(page_records, start=start_idx + 1):
-                # 닉네임과 디스코드 유저명 함께 표시하여 동명이인이나 변경에 대비
-                if r["display_name"] != r["username"]:
-                    user_label = f"**{r['display_name']}** `({r['username']})`"
-                else:
-                    user_label = f"**{r['display_name']}**"
-                    
-                lines.append(f"`{i:2d}.` {user_label} : {r['content']}")
+                # 유저명(아이디) 제거하고 순수 닉네임만 표시
+                lines.append(f"`{i:2d}.` **{r['display_name']}** : {r['content']}")
             description += "\n".join(lines)
 
         embed = discord.Embed(
@@ -4687,38 +4707,41 @@ class ThreadRosterView(discord.ui.View):
             description=description,
             color=discord.Color.teal() if not self.search_query else discord.Color.orange()
         )
-        embed.set_footer(text=f"스레드 ID: {self.thread_id} • 🔍 검색 또는 페이지 버튼을 사용해보세요.")
+        embed.set_footer(text=f"스레드 ID: {self.thread_id} • 실시간 자동 갱신 • 🔍 검색 또는 페이지 버튼 지원")
         return embed
 
-    @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="◀️")
+    @discord.ui.button(label="이전", style=discord.ButtonStyle.secondary, emoji="◀️", custom_id="btn_thread_roster_prev")
     async def prev_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.ensure_records()
         self.current_page = max(0, self.current_page - 1)
         self.update_button_states()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="▶️")
+    @discord.ui.button(label="다음", style=discord.ButtonStyle.secondary, emoji="▶️", custom_id="btn_thread_roster_next")
     async def next_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.ensure_records()
         filtered = self.get_filtered_records()
         max_page = max(1, (len(filtered) + self.page_size - 1) // self.page_size)
         self.current_page = min(max_page - 1, self.current_page + 1)
         self.update_button_states()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="닉네임 검색", style=discord.ButtonStyle.primary, emoji="🔍")
+    @discord.ui.button(label="닉네임 검색", style=discord.ButtonStyle.primary, emoji="🔍", custom_id="btn_thread_roster_search")
     async def search_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(ThreadSearchModal(parent_view=self))
 
-    @discord.ui.button(label="전체보기", style=discord.ButtonStyle.success, emoji="🔄")
+    @discord.ui.button(label="전체보기", style=discord.ButtonStyle.success, emoji="🔄", custom_id="btn_thread_roster_reset")
     async def reset_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.ensure_records()
         self.search_query = None
         self.current_page = 0
         self.update_button_states()
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
-    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.secondary, emoji="⚡")
+    @discord.ui.button(label="새로고침", style=discord.ButtonStyle.secondary, emoji="⚡", custom_id="btn_thread_roster_refresh")
     async def refresh_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        records, err = await fetch_thread_members_data(self.bot, self.guild, self.thread_id)
+        records, err = await fetch_thread_members_data(self.bot, self.guild or interaction.guild, self.thread_id)
         if records is not None:
             self.all_records = records
             self.update_button_states()
@@ -4727,8 +4750,70 @@ class ThreadRosterView(discord.ui.View):
             await interaction.followup.send(err or "❌ 새로고침 실패", ephemeral=True)
 
 
+async def refresh_thread_roster_panel(thread: discord.Thread, force_recreate: bool = True):
+    """
+    기존 스레드 명단 패널 메시지를 삭제하고, 스레드의 가장 마지막(맨 밑)에 새로운 패널을 전송하여 고정합니다.
+    force_recreate가 False이고 이미 마지막 메시지가 해당 패널인 경우 내용만 최신으로 수정합니다.
+    """
+    try:
+        records, err = await fetch_thread_members_data(bot, thread.guild, thread.id)
+        if records is None:
+            print(f"❌ 스레드 명단 패널 갱신 실패: {err}")
+            return
+
+        view = ThreadRosterView(bot, thread.guild, thread.id, all_records=records)
+        embed = view.build_embed()
+
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        p = "%s" if DATABASE_URL else "?"
+        cursor.execute(f"SELECT message_id FROM thread_roster_panel WHERE thread_id = {p}", (thread.id,))
+        row = cursor.fetchone()
+        old_msg_id = row[0] if row else None
+
+        # force_recreate가 False이고 이미 마지막 메시지가 해당 패널인 경우 내용만 수정
+        if not force_recreate and old_msg_id:
+            try:
+                last_msg = None
+                async for m in thread.history(limit=1):
+                    last_msg = m
+                    break
+                if last_msg and last_msg.id == old_msg_id:
+                    await last_msg.edit(embed=embed, view=view)
+                    cursor.close()
+                    conn.close()
+                    print(f"📋 스레드 명단 기존 메시지 내용 갱신 완료 (ID: {last_msg.id})")
+                    return
+            except Exception:
+                pass
+
+        # 기존 패널 메시지 삭제
+        if old_msg_id:
+            try:
+                old_msg = await thread.fetch_message(old_msg_id)
+                await old_msg.delete()
+            except Exception:
+                pass
+
+        new_msg = await thread.send(embed=embed, view=view)
+
+        query = f"""
+        INSERT INTO thread_roster_panel (thread_id, message_id)
+        VALUES ({p}, {p})
+        ON CONFLICT (thread_id)
+        DO UPDATE SET message_id = EXCLUDED.message_id
+        """
+        cursor.execute(query, (thread.id, new_msg.id))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print(f"📋 스레드 명단 패널 맨 밑으로 갱신 완료 (ID: {new_msg.id})")
+    except Exception as e:
+        print(f"❌ 스레드 명단 패널 갱신 오류: {e}")
+
+
 @bot.tree.command(name="스레드명단", description="지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하고 검색합니다.")
-@app_commands.describe(검색어="찾고자 하는 닉네임 또는 유저명 (생략 시 전체 명단 조회)")
+@app_commands.describe(검색어="찾고자 하는 닉네임 (생략 시 전체 명단 조회)")
 async def slash_thread_roster(interaction: discord.Interaction, 검색어: str = None):
     await interaction.response.defer()
     guild = interaction.guild
@@ -4741,20 +4826,29 @@ async def slash_thread_roster(interaction: discord.Interaction, 검색어: str =
         await interaction.followup.send(err, ephemeral=True)
         return
 
-    view = ThreadRosterView(bot, guild, DEFAULT_TARGET_THREAD_ID, records, interaction.user.id, search_query=검색어)
+    view = ThreadRosterView(bot, guild, DEFAULT_TARGET_THREAD_ID, records, search_query=검색어)
     await interaction.followup.send(embed=view.build_embed(), view=view)
 
 
 @bot.command(name="스레드명단", aliases=["스레드정리", "스레드검색", "스레드닉네임"])
 async def cmd_thread_roster(ctx, *, 검색어: str = None):
-    """지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하고 검색합니다."""
+    """지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하거나, 해당 스레드 맨 밑에 패널을 고정합니다."""
+    # 만약 해당 스레드 안에서 명령어를 친 경우 패널을 맨 밑으로 갱신
+    if ctx.channel.id == DEFAULT_TARGET_THREAD_ID and isinstance(ctx.channel, discord.Thread):
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        await refresh_thread_roster_panel(ctx.channel, force_recreate=True)
+        return
+
     loading_msg = await ctx.send("⏳ 스레드 메시지를 분석하는 중입니다...")
     records, err = await fetch_thread_members_data(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID)
     if err:
         await loading_msg.edit(content=err)
         return
 
-    view = ThreadRosterView(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID, records, ctx.author.id, search_query=검색어)
+    view = ThreadRosterView(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID, records, search_query=검색어)
     await loading_msg.delete()
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -4779,6 +4873,12 @@ async def on_message(message):
     # 특정 채널(ID: 1516049566535909439)의 메시지는 봇이 무시하도록 설정
     if message.channel.id == 1516049566535909439:
         return
+
+    # 지정된 스레드(ID: 1498269657176473685)에 새 메시지가 작성되면 실시간으로 명단 패널을 맨 밑으로 갱신
+    if message.channel.id == DEFAULT_TARGET_THREAD_ID and isinstance(message.channel, discord.Thread):
+        # 명령어(!스레드명단 등)로 시작하는 메시지가 아닐 때만 자동 갱신
+        if not message.content.startswith(('!', '/', '$', '?')):
+            await refresh_thread_roster_panel(message.channel, force_recreate=True)
 
 #     # "로또" 또는 "!로또" 텍스트 명령어 대응
 #     if message.content.strip() == "로또" or message.content.strip() == "!로또":
