@@ -4583,10 +4583,17 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
             
             author = msg.author
             member = guild.get_member(author.id)
-            if member:
-                display_name = member.nick or member.name
-            else:
-                display_name = getattr(author, 'nick', None) or author.name
+            if not member:
+                try:
+                    member = await guild.fetch_member(author.id)
+                except Exception:
+                    member = None
+
+            # 서버에서 나간 유저는 명단에서 제외
+            if not member:
+                continue
+
+            display_name = member.nick or member.name
                 
             clean_content = msg.content.strip().replace("\n", " ")
             if len(clean_content) > 40:
@@ -5252,6 +5259,20 @@ async def on_member_remove(member):
         print(f"📥 유저 퇴장 기록 및 메시지 수집 완료: {member.name} ({member.id})")
     except Exception as e:
         print(f"❌ 퇴장 기록 중 DB 처리 오류 발생: {e}")
+
+    # 유저 퇴장 시 스레드 명단 패널에서도 즉시 제외되도록 패널 갱신
+    try:
+        target_thread_id = DEFAULT_TARGET_THREAD_ID
+        thread = member.guild.get_thread(target_thread_id)
+        if not thread:
+            try:
+                thread = await member.guild.fetch_channel(target_thread_id)
+            except Exception:
+                thread = None
+        if thread:
+            await refresh_thread_roster_panel(thread, force_recreate=False)
+    except Exception as e:
+        print(f"❌ 퇴장 멤버 스레드 명단 갱신 오류: {e}")
 
 # 유저 입장 감지 이벤트
 @bot.event
