@@ -3622,18 +3622,17 @@ async def on_ready():
     else:
         print(f"❌ 오류: 자기소개 채널 ID {intro_channel_id}를 찾을 수 없습니다.")
 
-    # 2-3. 스레드 명단 패널 메시지 확인 및 맨 밑 유지 (스레드 ID: 1498269657176473685)
-    target_thread_id = 1498269657176473685
+    # 2-3. 스레드 명단 패널 메시지 확인 및 맨 밑 유지 (오버워치 & 배그)
     for guild in bot.guilds:
-        t = guild.get_thread(target_thread_id)
-        if not t:
-            try:
-                t = await guild.fetch_channel(target_thread_id)
-            except Exception:
-                t = None
-        if t:
-            await refresh_thread_roster_panel(t, force_recreate=False)
-            break
+        for t_id in TARGET_ROSTER_THREADS.keys():
+            t = guild.get_thread(t_id)
+            if not t:
+                try:
+                    t = await guild.fetch_channel(t_id)
+                except Exception:
+                    t = None
+            if t:
+                await refresh_thread_roster_panel(t, force_recreate=False)
 
     # 3. 현재 음성 채널에 있는 유저들 세션 초기화
     global active_sessions
@@ -4558,6 +4557,20 @@ async def monthly_record(interaction: discord.Interaction, 조회월: str = None
 # ========================================================
 # 스레드 명단 조회 및 실시간 검색 인터랙티브 뷰
 # ========================================================
+TARGET_ROSTER_THREADS = {
+    1498269657176473685: {
+        "title": "📋 오버워치 닉네임",
+        "name": "오버워치"
+    },
+    1498269758934618142: {
+        "title": "📋 배그 닉네임",
+        "name": "배그"
+    },
+    1498269846436319273: {
+        "title": "📋 롤 닉네임",
+        "name": "롤"
+    }
+}
 DEFAULT_TARGET_THREAD_ID = 1498269657176473685
 
 def extract_member_level(display_name: str) -> int:
@@ -4633,7 +4646,7 @@ async def fetch_thread_members_data(bot_instance, guild: discord.Guild, thread_i
     return records_list, None
 
 
-class ThreadSearchModal(discord.ui.Modal, title="스레드 닉네임 검색"):
+class ThreadSearchModal(discord.ui.Modal, title="닉네임 검색"):
     search_input = discord.ui.TextInput(
         label="검색할 닉네임",
         placeholder="예: 철수, 홍길동, 98 등 (일부만 입력해도 검색됩니다)",
@@ -4702,7 +4715,9 @@ class ThreadRosterView(discord.ui.View):
         start_idx = self.current_page * self.page_size
         page_records = filtered[start_idx:start_idx + self.page_size]
 
-        title = "📋 오버워치 닉네임"
+        thread_info = TARGET_ROSTER_THREADS.get(self.thread_id, {"title": "📋 스레드 닉네임"})
+        title = thread_info["title"]
+
         if self.search_query:
             description = (
                 f"🔍 **검색어:** `{self.search_query}` (일치: **{matched_count}**명 / 전체: **{total_count}**명)\n"
@@ -4722,7 +4737,6 @@ class ThreadRosterView(discord.ui.View):
         else:
             lines = []
             for i, r in enumerate(page_records, start=start_idx + 1):
-                # 유저명(아이디) 제거하고 순수 닉네임만 표시
                 lines.append(f"`{i:2d}.` **{r['display_name']}** : {r['content']}")
             description += "\n".join(lines)
 
@@ -4806,7 +4820,7 @@ async def refresh_thread_roster_panel(thread: discord.Thread, force_recreate: bo
                     await last_msg.edit(embed=embed, view=view)
                     cursor.close()
                     conn.close()
-                    print(f"📋 스레드 명단 기존 메시지 내용 갱신 완료 (ID: {last_msg.id})")
+                    print(f"📋 스레드 명단 기존 메시지 내용 갱신 완료 ({thread.name} / ID: {last_msg.id})")
                     return
             except Exception:
                 pass
@@ -4831,34 +4845,48 @@ async def refresh_thread_roster_panel(thread: discord.Thread, force_recreate: bo
         conn.commit()
         cursor.close()
         conn.close()
-        print(f"📋 스레드 명단 패널 맨 밑으로 갱신 완료 (ID: {new_msg.id})")
+        print(f"📋 스레드 명단 패널 맨 밑으로 갱신 완료 ({thread.name} / ID: {new_msg.id})")
     except Exception as e:
         print(f"❌ 스레드 명단 패널 갱신 오류: {e}")
 
 
-@bot.tree.command(name="스레드명단", description="오버워치 닉네임 명단을 조회하고 검색합니다.")
-@app_commands.describe(검색어="찾고자 하는 닉네임 (생략 시 전체 명단 조회)")
-async def slash_thread_roster(interaction: discord.Interaction, 검색어: str = None):
+@bot.tree.command(name="스레드명단", description="오버워치, 배그 또는 롤 닉네임 명단을 조회하고 검색합니다.")
+@app_commands.describe(
+    게임="조회할 게임 명단 선택",
+    검색어="찾고자 하는 닉네임 (생략 시 전체 명단 조회)"
+)
+@app_commands.choices(게임=[
+    app_commands.Choice(name="오버워치", value="ow"),
+    app_commands.Choice(name="배틀그라운드 (배그)", value="pubg"),
+    app_commands.Choice(name="리그 오브 레전드 (롤)", value="lol")
+])
+async def slash_thread_roster(interaction: discord.Interaction, 게임: str = "ow", 검색어: str = None):
     await interaction.response.defer()
     guild = interaction.guild
     if not guild:
         await interaction.followup.send("❌ 서버 내에서만 사용할 수 있습니다.", ephemeral=True)
         return
 
-    records, err = await fetch_thread_members_data(bot, guild, DEFAULT_TARGET_THREAD_ID)
+    if 게임 == "pubg":
+        thread_id = 1498269758934618142
+    elif 게임 == "lol":
+        thread_id = 1498269846436319273
+    else:
+        thread_id = 1498269657176473685
+    records, err = await fetch_thread_members_data(bot, guild, thread_id)
     if err:
         await interaction.followup.send(err, ephemeral=True)
         return
 
-    view = ThreadRosterView(bot, guild, DEFAULT_TARGET_THREAD_ID, records, search_query=검색어)
+    view = ThreadRosterView(bot, guild, thread_id, records, search_query=검색어)
     await interaction.followup.send(embed=view.build_embed(), view=view)
 
 
-@bot.command(name="스레드명단", aliases=["스레드정리", "스레드검색", "스레드닉네임"])
+@bot.command(name="스레드명단", aliases=["스레드정리", "스레드검색", "스레드닉네임", "배그명단", "옵치명단", "롤명단"])
 async def cmd_thread_roster(ctx, *, 검색어: str = None):
     """지정된 스레드에서 작성한 유저들의 닉네임을 깔끔하게 조회하거나, 해당 스레드 맨 밑에 패널을 고정합니다."""
-    # 만약 해당 스레드 안에서 명령어를 친 경우 패널을 맨 밑으로 갱신
-    if ctx.channel.id == DEFAULT_TARGET_THREAD_ID and isinstance(ctx.channel, discord.Thread):
+    # 만약 지원하는 스레드 안에서 명령어를 친 경우 해당 스레드 패널을 맨 밑으로 갱신
+    if ctx.channel.id in TARGET_ROSTER_THREADS and isinstance(ctx.channel, discord.Thread):
         try:
             await ctx.message.delete()
         except Exception:
@@ -4866,13 +4894,22 @@ async def cmd_thread_roster(ctx, *, 검색어: str = None):
         await refresh_thread_roster_panel(ctx.channel, force_recreate=True)
         return
 
+    # 기본 스레드(오버워치) 또는 명령어 이름에 따른 스레드 선택
+    invoked = ctx.invoked_with
+    if invoked == "배그명단":
+        target_id = 1498269758934618142
+    elif invoked == "롤명단":
+        target_id = 1498269846436319273
+    else:
+        target_id = DEFAULT_TARGET_THREAD_ID
+
     loading_msg = await ctx.send("⏳ 스레드 메시지를 분석하는 중입니다...")
-    records, err = await fetch_thread_members_data(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID)
+    records, err = await fetch_thread_members_data(bot, ctx.guild, target_id)
     if err:
         await loading_msg.edit(content=err)
         return
 
-    view = ThreadRosterView(bot, ctx.guild, DEFAULT_TARGET_THREAD_ID, records, search_query=검색어)
+    view = ThreadRosterView(bot, ctx.guild, target_id, records, search_query=검색어)
     await loading_msg.delete()
     await ctx.send(embed=view.build_embed(), view=view)
 
@@ -4898,8 +4935,8 @@ async def on_message(message):
     if message.channel.id == 1516049566535909439:
         return
 
-    # 지정된 스레드(ID: 1498269657176473685)에 새 메시지가 작성되면 실시간으로 명단 패널을 맨 밑으로 갱신
-    if message.channel.id == DEFAULT_TARGET_THREAD_ID and isinstance(message.channel, discord.Thread):
+    # 지정된 스레드(오버워치 또는 배그)에 새 메시지가 작성되면 실시간으로 명단 패널을 맨 밑으로 갱신
+    if message.channel.id in TARGET_ROSTER_THREADS and isinstance(message.channel, discord.Thread):
         # 명령어(!스레드명단 등)로 시작하는 메시지가 아닐 때만 자동 갱신
         if not message.content.startswith(('!', '/', '$', '?')):
             await refresh_thread_roster_panel(message.channel, force_recreate=True)
@@ -5277,17 +5314,17 @@ async def on_member_remove(member):
     except Exception as e:
         print(f"❌ 퇴장 기록 중 DB 처리 오류 발생: {e}")
 
-    # 유저 퇴장 시 스레드 명단 패널에서도 즉시 제외되도록 패널 갱신
+    # 유저 퇴장 시 스레드 명단 패널에서도 즉시 제외되도록 패널 갱신 (오버워치 & 배그)
     try:
-        target_thread_id = DEFAULT_TARGET_THREAD_ID
-        thread = member.guild.get_thread(target_thread_id)
-        if not thread:
-            try:
-                thread = await member.guild.fetch_channel(target_thread_id)
-            except Exception:
-                thread = None
-        if thread:
-            await refresh_thread_roster_panel(thread, force_recreate=False)
+        for t_id in TARGET_ROSTER_THREADS.keys():
+            thread = member.guild.get_thread(t_id)
+            if not thread:
+                try:
+                    thread = await member.guild.fetch_channel(t_id)
+                except Exception:
+                    thread = None
+            if thread:
+                await refresh_thread_roster_panel(thread, force_recreate=False)
     except Exception as e:
         print(f"❌ 퇴장 멤버 스레드 명단 갱신 오류: {e}")
 
