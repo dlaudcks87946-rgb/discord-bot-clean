@@ -3298,8 +3298,8 @@ class IntroModal(discord.ui.Modal, title="자기소개 작성"):
             nick_err_msg = f"\n⚠️ 닉네임 변경 중 오류 발생: {e}"
             print(f"❌ [모달 자기소개] 닉네임 변경 오류: {e}")
 
-        # 3. 역할 부여 (1497939431473287238) 및 이전 역할 제거 (1369712767631626313)
-        grant_role_id = 1497939431473287238
+        # 3. 역할 부여 (1566108369499062503) 및 이전 역할 제거 (1369712767631626313)
+        grant_role_id = 1566108369499062503
         remove_role_id = 1369712767631626313
 
         role_to_grant = guild.get_role(grant_role_id)
@@ -5172,8 +5172,8 @@ async def on_message(message):
 
                 role_to_remove = message.guild.get_role(target_role_id)
                 
-                # 부여할 역할 (ID: 1497939431473287238)
-                grant_role_id = 1497939431473287238
+                # 부여할 역할 (ID: 1566108369499062503)
+                grant_role_id = 1566108369499062503
                 role_to_grant = message.guild.get_role(grant_role_id)
                 
                 # 역할 부여 처리
@@ -5331,7 +5331,7 @@ async def on_member_remove(member):
 # 유저 입장 감지 이벤트
 @bot.event
 async def on_member_join(member):
-    # 최근 업데이트: 입장 시 1369712767631626313 부여 및 1497939431473287238 제거
+    # 최근 업데이트: 입장 시 1369712767631626313 부여 및 1566108369499062503 제거
     # 입장 시 역할 부여 (역할 ID: 1369712767631626313)
     target_role_id = 1369712767631626313
     role = member.guild.get_role(target_role_id)
@@ -5354,8 +5354,8 @@ async def on_member_join(member):
         print(f"❌ 최신 멤버 정보 로드 실패: {fetch_err}")
         fresh_member = member
 
-    # 입장 시 역할 제거 (역할 ID: 1497939431473287238)
-    remove_role_id = 1497939431473287238
+    # 입장 시 역할 제거 (역할 ID: 1566108369499062503)
+    remove_role_id = 1566108369499062503
     role_to_remove = member.guild.get_role(remove_role_id)
     if role_to_remove:
         try:
